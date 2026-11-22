@@ -110,9 +110,14 @@ PAGE = r'''<!doctype html>
     const ukey = (b, m) => m;
 
     function createDefaultState() {
-      const id = "chat_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
-      return { usage: {}, activeChatId: id, chats: { [id]: { id, title: "Новий чат", bot: "vasya", mode: "default", messages: [] } } };
+      const id = "chat_" + Date.now();
+      return {
+        chats: { [id]: { id, title: "Новий чат", mode: "default", messages: [] } },
+        usage: {},
+        activeChatId: id
+      };
     }
+
     function loadState() {
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
@@ -121,143 +126,187 @@ PAGE = r'''<!doctype html>
         if (!p.chats || !Object.keys(p.chats).length) return createDefaultState();
         if (!p.usage) p.usage = {};
         return p;
-      } catch { return createDefaultState(); }
+      } catch (e) {
+        return createDefaultState();
+      }
     }
+
     let state = loadState();
-    function saveState() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {} }
+
+    function saveState() {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
+    }
 
     function getActiveChat() {
-      if (!state.chats[state.activeChatId]) state.activeChatId = Object.keys(state.chats)[0];
+      if (!state.chats[state.activeChatId]) {
+        state.activeChatId = Object.keys(state.chats)[0];
+      }
       const c = state.chats[state.activeChatId];
-      if (!BOTS[c.bot]) c.bot = "vasya";
       if (!MODES[c.mode]) c.mode = "default";
       return c;
     }
-    const botName = () => BOTS[getActiveChat().bot].name;
 
     function showError(msg) {
       const box = document.getElementById("errorBox");
-      box.style.display = msg ? "block" : "none";
-      box.textContent = msg || "";
+      if (!msg) {
+        box.style.display = "none";
+        box.textContent = "";
+        return;
+      }
+      box.style.display = "block";
+      box.textContent = msg;
     }
 
     function startThinking() {
       stopThinking();
-      isThinking = true; thinkSeconds = 0; render();
+      isThinking = true;
+      thinkSeconds = 0;
       thinkTimer = setInterval(() => {
         thinkSeconds += 1;
         const el = document.getElementById("thinkingBubble");
-        if (el) el.textContent = `${botName()} думає... (${thinkSeconds} с)`;
+        if (el) el.textContent = `Вася думає... (${thinkSeconds} сек)`;
       }, 1000);
     }
+
     function stopThinking() {
-      isThinking = false; thinkSeconds = 0;
-      if (thinkTimer) { clearInterval(thinkTimer); thinkTimer = null; }
+      isThinking = false;
+      if (thinkTimer) {
+        clearInterval(thinkTimer);
+        thinkTimer = null;
+      }
     }
 
     function newChat() {
       if (isThinking) return;
       const cur = getActiveChat();
-      const id = "chat_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
-      state.chats[id] = { id, title: "Новий чат", bot: cur.bot, mode: cur.mode, messages: [] };
-      state.activeChatId = id; saveState(); render();
-    }
-    function selectChat(id) {
-      if (isThinking || !state.chats[id]) return;
-      state.activeChatId = id; saveState(); render();
-    }
-    function changeMode(mode) {
-      if (isThinking || !MODES[mode]) return;
-      getActiveChat().mode = mode; saveState(); render();
+      const id = "chat_" + Date.now();
+      state.chats[id] = { id, title: "Новий чат", mode: cur.mode || "default", messages: [] };
+      state.activeChatId = id;
+      saveState();
+      render();
     }
 
-    function render() {
-      const chat = getActiveChat(), bot = chat.bot, mode = chat.mode, mi = MODES[mode];
-      document.body.setAttribute("data-bot", bot);
-      document.getElementById("modeSelect").value = mode;
+    function selectChat(id) {
+      if (isThinking || !state.chats[id]) return;
+      state.activeChatId = id;
+      saveState();
+      render();
+    }
+
+    function changeMode(mode) {
+      if (isThinking || !MODES[mode]) return;
+      const c = getActiveChat();
+      c.mode = mode;
+      saveState();
+      render();
+    }
+        function render() {
+      const chat = getActiveChat();
+      const m = MODES[chat.mode] || MODES.default;
+      document.getElementById("modeSelect").value = chat.mode;
       document.getElementById("sendBtn").disabled = isThinking;
 
       const chatsBar = document.getElementById("chatsBar");
       chatsBar.innerHTML = "";
-      Object.values(state.chats).forEach(c => {
-        const chip = document.createElement("div");
+      Object.values(state.chats).forEach((c) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
         chip.className = "chat-chip" + (c.id === chat.id ? " active" : "");
-        chip.textContent = `${BOTS[c.bot] ? BOTS[c.bot].name : "Вася"} · ${c.title}`;
+        chip.textContent = `Вася · ${c.title}`;
         chip.onclick = () => selectChat(c.id);
         chatsBar.appendChild(chip);
       });
 
-      const label = `${BOTS[bot].name} ${mi.sfx}`;
       const quotaBox = document.getElementById("quotaBox");
-      if (mi.limit === null) quotaBox.textContent = `${label}: безліміт`;
-      else {
-        const rem = Math.max(0, mi.limit - (state.usage[ukey(bot, mode)] || 0));
-        quotaBox.textContent = `${label}: залишилось ${rem}/${mi.limit}`;
+      const k = ukey("vasya", chat.mode);
+      if (m.limit == null) {
+        quotaBox.textContent = `Вася ${m.sfx}: безліміт`;
+      } else {
+        const used = state.usage[k] || 0;
+        const rem = Math.max(0, m.limit - used);
+        quotaBox.textContent = `Вася ${m.sfx}: залишилось ${rem}/${m.limit}`;
       }
 
       const msgBox = document.getElementById("messagesBox");
       msgBox.innerHTML = "";
-      (chat.messages || []).forEach(m => {
+      (chat.messages || []).forEach((item) => {
         const div = document.createElement("div");
-        div.className = "msg " + m.role;
+        div.className = "msg " + (item.role === "user" ? "user" : "assistant");
         const who = document.createElement("div");
         who.className = "who";
-        who.textContent = m.role === "user" ? "Ти" : BOTS[bot].name;
+        who.textContent = item.role === "user" ? "Ти" : "Вася";
         const body = document.createElement("div");
-        body.textContent = m.text;
-        div.appendChild(who); div.appendChild(body); msgBox.appendChild(div);
+        body.textContent = item.text;
+        div.appendChild(who);
+        div.appendChild(body);
+        msgBox.appendChild(div);
       });
+
       if (isThinking) {
         const t = document.createElement("div");
-        t.className = "msg assistant thinking"; t.id = "thinkingBubble";
-        t.textContent = `${BOTS[bot].name} думає... (${thinkSeconds} с)`;
+        t.id = "thinkingBubble";
+        t.className = "msg assistant thinking";
+        t.textContent = `Вася думає... (${thinkSeconds} сек)`;
         msgBox.appendChild(t);
       }
+      msgBox.scrollTop = msgBox.scrollHeight;
     }
 
-    async function ask(instruction, msgs) {
+    async function askInstruction(instruction, messages) {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          system: instruction + " Не вказуй, яка саме модель чи компанія за тобою стоїть, якщо тебе прямо про це не питають. Ніколи не заперечуй, що ти штучний інтелект.",
-          messages: msgs.map(m => ({ role: m.role, text: m.text }))
+          system: instruction,
+          messages: messages.map((m) => ({ role: m.role, text: m.text }))
         })
       });
       let data = {};
-      try { data = await res.json(); } catch {}
-      if (!res.ok) throw new Error((data.error && data.error.message) || `HTTP ${res.status}`);
-      return data.text || "(Порожня відповідь)";
+      try { data = await res.json(); } catch (e) {}
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data.reply || data.text || "Порожня відповідь";
     }
 
     async function handleSend(e) {
       e.preventDefault();
       if (isThinking) return;
       showError("");
-      const chat = getActiveChat(), bot = chat.bot, mode = chat.mode, mi = MODES[mode];
+
+      const chat = getActiveChat();
+      const m = MODES[chat.mode] || MODES.default;
       const input = document.getElementById("msgInput");
       const text = input.value.trim();
       if (!text) return;
-      if (mi.limit !== null && (state.usage[ukey(bot, mode)] || 0) >= mi.limit) {
-        showError(`Ліміт для режиму «${BOTS[bot].name} ${mi.sfx}» вичерпано (${mi.limit}/${mi.limit}).`);
+
+      const k = ukey("vasya", chat.mode);
+      if (m.limit != null && (state.usage[k] || 0) >= m.limit) {
+        showError(`Ліміт для режиму ${m.sfx} вичерпано.`);
         return;
       }
+
       const firstTitle = chat.title === "Новий чат";
       chat.messages.push({ role: "user", text });
-      if (firstTitle) chat.title = text.slice(0, 32) + (text.length > 32 ? "..." : "");
+      if (firstTitle) chat.title = text.slice(0, 32) || "Чат";
       input.value = "";
-      saveState(); startThinking();
+      saveState();
+      startThinking();
+      render();
+
       try {
-        const reply = await ask(INSTR[bot][mode], chat.messages);
+        const sys = (INSTR.vasya && INSTR.vasya[chat.mode]) || INSTR.vasya.default;
+        const reply = await askInstruction(sys, chat.messages);
         chat.messages.push({ role: "assistant", text: reply });
-        if (mi.limit !== null) state.usage[ukey(bot, mode)] = (state.usage[ukey(bot, mode)] || 0) + 1;
-        saveState(); stopThinking(); render();
+        if (m.limit != null) state.usage[k] = (state.usage[k] || 0) + 1;
+        saveState();
       } catch (err) {
         chat.messages.pop();
         if (firstTitle && !chat.messages.length) chat.title = "Новий чат";
         input.value = text;
-        saveState(); stopThinking(); render();
+        saveState();
         showError("Помилка запиту: " + err.message);
+      } finally {
+        stopThinking();
+        render();
       }
     }
 
@@ -267,31 +316,32 @@ PAGE = r'''<!doctype html>
 </html>
 '''
 
+
 @app.after_request
 def cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     return resp
 
 
 def err(msg, code):
-    return jsonify({"error": {"message": msg}}), code
+    return jsonify({"error": msg}), code
 
 
-@app.route("/")
-@app.route("/api/index")
+@app.route("/", methods=["GET"])
 def index():
     return Response(PAGE, mimetype="text/html")
 
 
-@app.route("/icon.png")
-@app.route("/favicon.ico")
+@app.route("/icon.png", methods=["GET"])
+@app.route("/favicon.ico", methods=["GET"])
 def icon():
     return send_from_directory(BASE, "icon.png", mimetype="image/png")
 
 
 @app.route("/api/chat", methods=["POST", "OPTIONS"])
+@app.route("/api/index", methods=["POST", "OPTIONS"])
 def chat():
     if request.method == "OPTIONS":
         return "", 204
@@ -300,43 +350,51 @@ def chat():
         return err("На сервері не задано GEMINI_API_KEY", 500)
 
     data = request.get_json(silent=True) or {}
-    system = str(data.get("system", ""))[:4000]
+    system_text = str(data.get("system") or "")[:4000]
+    raw_msgs = data.get("messages")
     msgs = []
-    for m in (data.get("messages") or [])[-20:]:
-        if isinstance(m, dict):
-            role = "model" if m.get("role") == "assistant" else "user"
-            msgs.append({"role": role, "parts": [{"text": str(m.get("text", ""))[:8000]}]})
+
+    if isinstance(raw_msgs, list):
+        for item in raw_msgs[-20:]:
+            if isinstance(item, dict):
+                role = "model" if item.get("role") == "assistant" else "user"
+                text = str(item.get("text") or "")[:8000]
+                if text:
+                    msgs.append({"role": role, "parts": [{"text": text}]})
+
     if not msgs:
         return err("Порожнє повідомлення", 400)
 
     payload = {
-        "systemInstruction": {"parts": [{"text": system}]},
+        "systemInstruction": {"parts": [{"text": system_text}]},
         "contents": msgs,
     }
-    if ENABLE_SEARCH:
+    if ENABLE_SEARCH == "1":
         payload["tools"] = [{"google_search": {}}]
 
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
         r = requests.post(
             url,
-            headers={"x-goog-api-key": API_KEY},
+            headers={"x-goog-api-key": API_KEY, "Content-Type": "application/json"},
             json=payload,
-            timeout=9,
+            timeout=25,
         )
         if r.status_code != 200:
-            print("MODEL ERROR", r.status_code, r.text[:300])
             return err(f"Помилка моделі ({r.status_code}). Спробуй ще раз.", 502)
-        parts = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        text = "".join(p.get("text", "") for p in parts if "text" in p)
-        return jsonify({"text": text or "(Порожня відповідь)"})
+
+        body = r.json()
+        candidates = body.get("candidates") or []
+        parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
+        text_out = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p)
+        return jsonify({"reply": text_out.strip() or "Порожня відповідь"})
     except requests.Timeout:
-        return err("Відповідь зайняла забагато часу для швидкого режиму. Спробуй уточнити або скоротити запит.", 504)
+        return err("Відповідь зайняла забагато часу. Спробуй ще раз.", 504)
     except Exception as e:
-        print("SERVER ERROR", e)
-        return err("Помилка сервера. Спробуй ще раз.", 500)
+        return err(f"Помилка сервера: {e}", 500)
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+  

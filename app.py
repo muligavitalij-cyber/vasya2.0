@@ -12,19 +12,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 app = Flask(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 
-DISABLE_GEMINI = os.environ.get("DISABLE_GEMINI", "1") == "1"
-API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
-RAW_MODEL = (os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash").strip()
-if RAW_MODEL.startswith("models/"):
-    RAW_MODEL = RAW_MODEL[len("models/"):]
-if RAW_MODEL.startswith("deepseek"):
-    RAW_MODEL = "gemini-2.5-flash"
-MODEL = RAW_MODEL or "gemini-2.5-flash"
-ENABLE_SEARCH = os.environ.get("ENABLE_SEARCH", "0") == "1"
 DEBUG = os.environ.get("DEBUG", "0") == "1"
-
-THINK = {"default": "MINIMAL", "smart": "LOW", "pro": "MEDIUM", "pro+": "HIGH"}
-WAIT = {"default": 25, "smart": 30, "pro": 45, "pro+": 55}
 
 
 def _load_openrouter_keys() -> List[str]:
@@ -219,7 +207,7 @@ def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
         return mime, base64.b64encode(raw).decode("ascii")
     except Exception:
         return None
-PAGE = r'''<!doctype html>
+    PAGE = r'''<!doctype html>
 <html lang="uk">
 <head>
   <meta charset="utf-8">
@@ -757,7 +745,7 @@ PAGE = r'''<!doctype html>
 </body>
 </html>
 '''
-def _build_openrouter_messages(raw_msgs, system_text: str, context_block: str = "") -> List[dict]:
+    def _build_openrouter_messages(raw_msgs, system_text: str, context_block: str = "") -> List[dict]:
     out: List[dict] = []
 
     merged_sys = (system_text or "").strip()
@@ -858,7 +846,8 @@ def call_openrouter_fallback(raw_msgs, system_text: str, mode: str, query_text: 
         return None, "Порожні повідомлення для OpenRouter"
 
     started_at = time.monotonic()
-    max_total_budget = min(float(WAIT.get(mode, 25)) - 2.0, 22.0)
+    budgets = {"default": 22.0, "smart": 24.0, "pro": 24.0, "pro+": 24.0}
+    max_total_budget = budgets.get(mode, 22.0)
     last_err = "Усі моделі та ключі OpenRouter не відповіли"
 
     for model_id in models:
@@ -958,123 +947,5 @@ def chat():
 
     data = request.get_json(silent=True) or {}
     system_text = str(data.get("system") or "")[:4000]
-    mode = data.get("mode") if data.get("mode") in THINK else "default"
-    raw_msgs = data.get("messages")
-    contents = []
-    last_user_text = ""
-
-    if isinstance(raw_msgs, list):
-        for item in raw_msgs[-20:]:
-            if not isinstance(item, dict):
-                continue
-            role = "model" if item.get("role") == "assistant" else "user"
-            text = str(item.get("text") or "")[:8000]
-            parts = []
-            if text:
-                parts.append({"text": text})
-                if role == "user":
-                    last_user_text = text
-
-            att = item.get("attachment")
-            if isinstance(att, dict) and role == "user":
-                att_name = str(att.get("name") or "file")
-                att_type = str(att.get("type") or "")
-                att_text = str(att.get("textContent") or "")[:12000]
-                att_data_url = str(att.get("dataUrl") or "")
-
-                if att_type.startswith("image/") and att_data_url:
-                    parsed = _parse_data_url(att_data_url)
-                    if parsed:
-                        mime, clean_b64 = parsed
-                        parts.append({"inlineData": {"mimeType": mime, "data": clean_b64}})
-                        if not text:
-                            last_user_text = f"Проаналізуй зображення/графік/таблицю: {att_name}"
-                elif att_text:
-                    parts.append({"text": f"[Вкладений файл {att_name}]\n{att_text}"})
-                    if not text:
-                        last_user_text = f"Проаналізуй дані з файлу {att_name}"
-
-            if parts:
-                contents.append({"role": role, "parts": parts})
-
-    if not any(m["role"] == "user" for m in contents):
-        return err("Порожнє повідомлення", 400)
-
-    context_block = ""
-    if ENABLE_SEARCH or detect_topics(last_user_text) != ["general"]:
-        context_block = collect_topic_context(last_user_text, max_items=2)
-
-    merged_system = system_text
-    if context_block:
-        merged_system = (
-            f"{system_text}\n\nДовідковий контекст із підібраних джерел:\n{context_block}\n"
-            "Спирайся на цей контекст, якщо він відповідає питанню."
-        ).strip()
-
-    gemini_failed_reason = "Gemini вимкнено (DISABLE_GEMINI=1)"
-    if not DISABLE_GEMINI and API_KEY:
-        gemini_failed_reason = ""
-        payload = {"contents": contents}
-        if merged_system:
-            payload["systemInstruction"] = {"parts": [{"text": merged_system}]}
-        if ENABLE_SEARCH:
-            payload["tools"] = [{"google_search": {}}]
-        if MODEL.startswith("gemini-3"):
-            payload["generationConfig"] = {"thinkingConfig": {"thinkingLevel": THINK[mode]}}
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-        headers = {"x-goog-api-key": API_KEY, "Content-Type": "application/json"}
-
-        for attempt in range(2):
-            try:
-                r = requests.post(url, headers=headers, json=payload, timeout=min(WAIT[mode], 16))
-                if r.status_code == 200:
-                    body = r.json()
-                    candidates = body.get("candidates") or []
-                    parts = (candidates[0].get("content") or {}).get("parts") or [] if candidates else []
-                    text_out = "".join(str(p.get("text") or "") for p in parts if not p.get("thought"))
-                    if text_out.strip():
-                        return jsonify({"reply": text_out.strip()})
-                    gemini_failed_reason = "Порожня відповідь від Gemini"
-                    break
-
-                try:
-                    detail = r.json().get("error", {}).get("message", "")
-                except Exception:
-                    detail = r.text[:200]
-                gemini_failed_reason = f"Gemini HTTP {r.status_code}: {detail}"
-
-                if r.status_code in (429, 503) and attempt == 0:
-                    time.sleep(0.5)
-                    continue
-                break
-            except requests.Timeout:
-                gemini_failed_reason = "Gemini таймаут"
-                if attempt == 0:
-                    continue
-                break
-            except Exception as e:
-                gemini_failed_reason = f"Gemini помилка: {e}"
-                break
-    elif not API_KEY:
-        gemini_failed_reason = "GEMINI_API_KEY не задано"
-
-    fb_reply, fb_err = call_openrouter_fallback(
-        raw_msgs=raw_msgs,
-        system_text=system_text,
-        mode=mode,
-        query_text=last_user_text,
-        context_block=context_block,
-    )
-    if fb_reply:
-        return jsonify({"reply": fb_reply})
-
-    if DEBUG:
-        return err(f"Основний шлях: {gemini_failed_reason} | Резерв: {fb_err}", 502)
-    return err("Сервіс тимчасово перевантажений. Спробуй ще раз за кілька секунд.", 503)
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-                    
+    mode = data.get("mode") if data.get("mode
+    

@@ -6,7 +6,7 @@ app = Flask(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 
 API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 ENABLE_SEARCH = os.environ.get("ENABLE_SEARCH", "1") != "0"
 
 # ---- Сторінка сайту ----

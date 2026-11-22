@@ -392,7 +392,7 @@ def chat():
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=25,
+            timeout=45,
         )
         if r.status_code != 200:
             detail = ""

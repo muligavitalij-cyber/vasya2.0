@@ -340,8 +340,14 @@ def icon():
     return send_from_directory(BASE, "icon.png", mimetype="image/png")
 
 
+@app.route("/api/index", methods=["GET", "POST", "OPTIONS"])
+def index_or_chat():
+    if request.method == "GET":
+        return Response(PAGE, mimetype="text/html")
+    return chat()
+
+
 @app.route("/api/chat", methods=["POST", "OPTIONS"])
-@app.route("/api/index", methods=["POST", "OPTIONS"])
 def chat():
     if request.method == "OPTIONS":
         return "", 204
@@ -397,4 +403,4 @@ def chat():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-  
+      

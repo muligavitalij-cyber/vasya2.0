@@ -25,6 +25,32 @@ DEBUG = os.environ.get("DEBUG", "0") == "1"
 THINK = {"default": "MINIMAL", "smart": "LOW", "pro": "MEDIUM", "pro+": "HIGH"}
 WAIT = {"default": 25, "smart": 30, "pro": 45, "pro+": 55}
 
+
+def _load_openrouter_keys() -> List[str]:
+    keys: List[str] = []
+    for env_name in (
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_API_KEY_2",
+        "OPENROUTER_API_KEY_3",
+        "OPENROUTER_API_KEY_4",
+        "OPENROUTER_API_KEY_5",
+        "OPENROUTER_API_KEYS",
+    ):
+        raw_val = (os.environ.get(env_name) or "").strip()
+        if not raw_val:
+            continue
+        for part in re.split(r"[\s,;]+", raw_val):
+            clean = part.strip().strip('"').strip("'")
+            if clean and clean not in keys:
+                keys.append(clean)
+    return keys
+
+
+OPENROUTER_KEYS = _load_openrouter_keys()
+OPENROUTER_DEFAULT_MODEL = (os.environ.get("OPENROUTER_MODEL") or "").strip().lower()
+OPENROUTER_FAST_MODEL = "google/gemma-4-26b-a4b-it:free"
+OPENROUTER_SMART_MODEL = "google/gemma-4-31b-it:free"
+
 TOPIC_KEYWORDS: Dict[str, List[str]] = {
     "geography": [
         "географія", "материк", "океан", "море", "річка", "озеро", "гора",
@@ -173,6 +199,8 @@ def collect_topic_context(query: str, max_items: int = 3) -> str:
                 notes.append(f"[{src.upper()}] Ключ підключено; запит: {query}")
 
     return "\n\n".join(notes)
+
+
 def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
     m = re.match(r"^data:([^;]+);base64,(.+)$", data_url or "", re.DOTALL)
     if not m:
@@ -186,8 +214,6 @@ def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
         return mime, base64.b64encode(raw).decode("ascii")
     except Exception:
         return None
-
-
 PAGE = r'''<!doctype html>
 <html lang="uk">
 <head>
@@ -378,7 +404,8 @@ PAGE = r'''<!doctype html>
       "Коли питають про берегову лінію, материк, країну чи регіон — давай повний, структурований перелік (океани, моря, затоки, протоки, крайні точки та миси, острови/півострови), нічого не пропускаючи. " +
       "Коли просять есе чи твір — пиши живою, грамотною українською мовою, з вступом, аргументами, прикладами й висновком, без сухої канцелярщини. " +
       "Коли розбираєш задачі — пояснюй крок за кроком.";
-      const INSTR = {
+
+    const INSTR = {
       vasya: {
         "default": "Ти — Вася АІ. Відповідай чітко, повно і по суті, без зайвої води та вигаданих фактів." + BASE_HW_RULES,
         "smart": "Ти — Вася АІ у режимі Смарт. Розбирай задачу логічно й зрозуміло, перевіряй кроки та факти." + BASE_HW_RULES,
@@ -541,6 +568,7 @@ PAGE = r'''<!doctype html>
         b.onclick = () => { selectChat(c.id); toggleMenu(false); };
         sideList.appendChild(b);
       });
+
       const quotaBox = document.getElementById("quotaBox");
       if (m.limit == null) {
         quotaBox.textContent = `Вася ${m.sfx}: безліміт`;
@@ -669,6 +697,170 @@ PAGE = r'''<!doctype html>
 </body>
 </html>
 '''
+def _build_openrouter_messages(raw_msgs, system_text: str, context_block: str = "") -> List[dict]:
+    out: List[dict] = []
+
+    merged_sys = (system_text or "").strip()
+    if context_block:
+        merged_sys = (
+            f"{merged_sys}\n\nДовідковий контекст із підібраних джерел:\n{context_block}\n"
+            "Спирайся на цей контекст, якщо він відповідає питанню."
+        ).strip()
+
+    if merged_sys:
+        out.append({"role": "system", "content": merged_sys})
+
+    if not isinstance(raw_msgs, list):
+        return out
+
+    for item in raw_msgs[-20:]:
+        if not isinstance(item, dict):
+            continue
+        role = "assistant" if item.get("role") == "assistant" else "user"
+        text = str(item.get("text") or "")[:8000]
+        parts: List[dict] = []
+
+        if text:
+            parts.append({"type": "text", "text": text})
+
+        att = item.get("attachment")
+        if isinstance(att, dict) and role == "user":
+            att_name = str(att.get("name") or "file")
+            att_type = str(att.get("type") or "")
+            att_text = str(att.get("textContent") or "")[:12000]
+            att_data_url = str(att.get("dataUrl") or "")
+
+            if att_type.startswith("image/") and att_data_url:
+                parsed = _parse_data_url(att_data_url)
+                if parsed:
+                    mime, clean_b64 = parsed
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{clean_b64}"}
+                    })
+                    if not text:
+                        parts.append({"type": "text", "text": f"Проаналізуй зображення/графік/таблицю: {att_name}"})
+            elif att_text:
+                parts.append({"type": "text", "text": f"[Вкладений файл {att_name}]\n{att_text}"})
+                if not text:
+                    parts.append({"type": "text", "text": f"Проаналізуй дані з файлу {att_name}"})
+
+        if parts:
+            if len(parts) == 1 and parts[0]["type"] == "text":
+                out.append({"role": role, "content": parts[0]["text"]})
+            else:
+                out.append({"role": role, "content": parts})
+
+    return out
+
+
+def _pick_openrouter_models(mode: str, query_text: str) -> List[str]:
+    q = (query_text or "").strip()
+    is_complex = (
+        mode in ("pro", "pro+")
+        or len(q) > 220
+        or any(k in q.lower() for k in (
+            "рівняння", "інтеграл", "похідна", "довод", "розв'яжи", "задача",
+            "поясни детально", "порівняй", "аналіз", "код", "python", "скрипт"
+        ))
+    )
+
+    ordered: List[str] = []
+    if OPENROUTER_DEFAULT_MODEL:
+        ordered.append(OPENROUTER_DEFAULT_MODEL)
+
+    if is_complex:
+        ordered.extend([OPENROUTER_SMART_MODEL, OPENROUTER_FAST_MODEL])
+    else:
+        ordered.extend([OPENROUTER_FAST_MODEL, OPENROUTER_SMART_MODEL])
+
+    final_models: List[str] = []
+    for m in ordered:
+        clean = (m or "").strip().lower()
+        if clean and clean not in final_models:
+            final_models.append(clean)
+    return final_models
+
+
+def call_openrouter_fallback(raw_msgs, system_text: str, mode: str, query_text: str, context_block: str = ""):
+    if not OPENROUTER_KEYS:
+        return None, "Не задано жодного ключа OpenRouter"
+
+    models = _pick_openrouter_models(mode, query_text)
+    if not models:
+        return None, "Не задано моделей OpenRouter"
+
+    messages = _build_openrouter_messages(raw_msgs, system_text, context_block)
+    if not messages:
+        return None, "Порожні повідомлення для OpenRouter"
+
+    started_at = time.monotonic()
+    max_total_budget = min(float(WAIT.get(mode, 25)) - 2.0, 22.0)
+    last_err = "Усі моделі та ключі OpenRouter не відповіли"
+
+    for model_id in models:
+        for api_key in OPENROUTER_KEYS:
+            elapsed = time.monotonic() - started_at
+            remaining = max_total_budget - elapsed
+            if remaining < 4.0:
+                return None, f"Замало часу до ліміту відповіді ({last_err})"
+
+            per_call_timeout = min(11.0, max(4.0, remaining))
+            payload = {
+                "model": model_id,
+                "messages": messages,
+                "temperature": 0.4 if mode == "default" else 0.3,
+            }
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://vasya-ai.vercel.app",
+                "X-Title": "Vasya AI",
+            }
+
+            try:
+                r = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=per_call_timeout,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    choices = data.get("choices") or []
+                    if choices:
+                        msg = choices[0].get("message") or {}
+                        content = msg.get("content")
+                        if isinstance(content, list):
+                            txt = "".join(
+                                str(part.get("text") or "")
+                                for part in content
+                                if isinstance(part, dict) and part.get("type") == "text"
+                            ).strip()
+                        else:
+                            txt = str(content or "").strip()
+                        if txt:
+                            return txt, None
+
+                try:
+                    detail = r.json().get("error", {}).get("message", "")
+                except Exception:
+                    detail = r.text[:180]
+                last_err = f"[{model_id}] HTTP {r.status_code}: {detail}"
+
+                if r.status_code in (401, 402, 403, 400, 404, 422):
+                    break
+                continue
+            except requests.Timeout:
+                last_err = f"[{model_id}] таймаут"
+                continue
+            except Exception as e:
+                last_err = f"[{model_id}] {e}"
+                continue
+
+    return None, last_err
+
+
 @app.after_request
 def cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -703,8 +895,6 @@ def index_or_chat():
 def chat():
     if request.method == "OPTIONS":
         return "", 204
-    if not API_KEY:
-        return err("Сервер не налаштований", 500)
 
     data = request.get_json(silent=True) or {}
     system_text = str(data.get("system") or "")[:4000]
@@ -750,7 +940,10 @@ def chat():
     if not any(m["role"] == "user" for m in contents):
         return err("Порожнє повідомлення", 400)
 
-    context_block = collect_topic_context(last_user_text, max_items=3)
+    context_block = ""
+    if ENABLE_SEARCH or detect_topics(last_user_text) != ["general"]:
+        context_block = collect_topic_context(last_user_text, max_items=2)
+
     merged_system = system_text
     if context_block:
         merged_system = (
@@ -758,58 +951,69 @@ def chat():
             "Спирайся на цей контекст, якщо він відповідає питанню."
         ).strip()
 
-    payload = {"contents": contents}
-    if merged_system:
-        payload["systemInstruction"] = {"parts": [{"text": merged_system}]}
-    if ENABLE_SEARCH:
-        payload["tools"] = [{"google_search": {}}]
-    if MODEL.startswith("gemini-3"):
-        payload["generationConfig"] = {"thinkingConfig": {"thinkingLevel": THINK[mode]}}
+    gemini_failed_reason = ""
+    if API_KEY:
+        payload = {"contents": contents}
+        if merged_system:
+            payload["systemInstruction"] = {"parts": [{"text": merged_system}]}
+        if ENABLE_SEARCH:
+            payload["tools"] = [{"google_search": {}}]
+        if MODEL.startswith("gemini-3"):
+            payload["generationConfig"] = {"thinkingConfig": {"thinkingLevel": THINK[mode]}}
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-    headers = {"x-goog-api-key": API_KEY, "Content-Type": "application/json"}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+        headers = {"x-goog-api-key": API_KEY, "Content-Type": "application/json"}
 
-    last_status = None
-    last_detail = ""
-    for attempt in range(3):
-        try:
-            r = requests.post(url, headers=headers, json=payload, timeout=WAIT[mode])
-            if r.status_code == 200:
-                body = r.json()
-                candidates = body.get("candidates") or []
-                parts = (candidates[0].get("content") or {}).get("parts") or [] if candidates else []
-                text_out = "".join(str(p.get("text") or "") for p in parts if not p.get("thought"))
-                return jsonify({"reply": text_out.strip() or "Порожня відповідь"})
-
-            last_status = r.status_code
+        for attempt in range(2):
             try:
-                last_detail = r.json().get("error", {}).get("message", "")
-            except Exception:
-                last_detail = r.text[:200]
+                r = requests.post(url, headers=headers, json=payload, timeout=min(WAIT[mode], 16))
+                if r.status_code == 200:
+                    body = r.json()
+                    candidates = body.get("candidates") or []
+                    parts = (candidates[0].get("content") or {}).get("parts") or [] if candidates else []
+                    text_out = "".join(str(p.get("text") or "") for p in parts if not p.get("thought"))
+                    if text_out.strip():
+                        return jsonify({"reply": text_out.strip()})
+                    gemini_failed_reason = "Порожня відповідь від Gemini"
+                    break
 
-            if r.status_code in (429, 503) and attempt < 2:
-                time.sleep(0.8 * (2 ** attempt))
-                continue
+                try:
+                    detail = r.json().get("error", {}).get("message", "")
+                except Exception:
+                    detail = r.text[:200]
+                gemini_failed_reason = f"Gemini HTTP {r.status_code}: {detail}"
 
-            print("MODEL ERROR", r.status_code, MODEL, last_detail)
-            if DEBUG:
-                return err(f"({r.status_code}) [{MODEL}]: {last_detail}", 502)
-            return err(f"Помилка сервера ({r.status_code}). Спробуй ще раз.", 502)
-        except requests.Timeout:
-            if attempt < 2:
-                time.sleep(0.6)
-                continue
-            return err("Відповідь зайняла забагато часу. Спробуй ще раз або обери інший режим.", 504)
-        except Exception as e:
-            print("SERVER ERROR", e)
-            if DEBUG:
-                return err(f"Помилка сервера: {e}", 500)
-            return err("Помилка сервера. Спробуй ще раз.", 500)
+                if r.status_code in (429, 503) and attempt == 0:
+                    time.sleep(0.5)
+                    continue
+                break
+            except requests.Timeout:
+                gemini_failed_reason = "Gemini таймаут"
+                if attempt == 0:
+                    continue
+                break
+            except Exception as e:
+                gemini_failed_reason = f"Gemini помилка: {e}"
+                break
+    else:
+        gemini_failed_reason = "GEMINI_API_KEY не задано"
 
-    return err(f"Сервіс тимчасово перевантажений ({last_status or '503'}).", 503)
+    fb_reply, fb_err = call_openrouter_fallback(
+        raw_msgs=raw_msgs,
+        system_text=system_text,
+        mode=mode,
+        query_text=last_user_text,
+        context_block=context_block,
+    )
+    if fb_reply:
+        return jsonify({"reply": fb_reply})
+
+    if DEBUG:
+        return err(f"Основний шлях: {gemini_failed_reason} | Резерв: {fb_err}", 502)
+    return err("Сервіс тимчасово перевантажений. Спробуй ще раз за кілька секунд.", 503)
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-    
+            

@@ -207,7 +207,9 @@ def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
         return mime, base64.b64encode(raw).decode("ascii")
     except Exception:
         return None
-    PAGE = r'''<!doctype html>
+
+
+PAGE = r'''<!doctype html>
 <html lang="uk">
 <head>
   <meta charset="utf-8">
@@ -230,7 +232,6 @@ def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
   </script>
   <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-
   <style>
     :root {
       --bg: #121212;
@@ -478,7 +479,6 @@ def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
         reader.readAsText(file);
       }
     }
-
     function startThinking() {
       stopThinking();
       isThinking = true;
@@ -745,7 +745,9 @@ def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
 </body>
 </html>
 '''
-    def _build_openrouter_messages(raw_msgs, system_text: str, context_block: str = "") -> List[dict]:
+
+
+def _build_openrouter_messages(raw_msgs, system_text: str, context_block: str = "") -> List[dict]:
     out: List[dict] = []
 
     merged_sys = (system_text or "").strip()
@@ -947,7 +949,7 @@ def chat():
 
     data = request.get_json(silent=True) or {}
     system_text = str(data.get("system") or "")[:4000]
-        mode = data.get("mode") if data.get("mode") in ("default", "smart", "pro", "pro+") else "default"
+    mode = data.get("mode") if data.get("mode") in ("default", "smart", "pro", "pro+") else "default"
     raw_msgs = data.get("messages")
     last_user_text = ""
     has_user_msg = False
@@ -998,5 +1000,4 @@ def chat():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-        
     

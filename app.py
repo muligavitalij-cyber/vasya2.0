@@ -1,11 +1,31 @@
 import base64
 import json
+import os
 import re
 import time
 import urllib.parse
 import urllib.request
+from typing import Dict, List, Optional, Tuple
+import requests
+from flask import Flask, Response, jsonify, request, send_from_directory
 
-TOPIC_KEYWORDS = {
+app = Flask(__name__)
+BASE = os.path.dirname(os.path.abspath(__file__))
+
+API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
+RAW_MODEL = (os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash").strip()
+if RAW_MODEL.startswith("models/"):
+    RAW_MODEL = RAW_MODEL[len("models/"):]
+if RAW_MODEL.startswith("deepseek"):
+    RAW_MODEL = "gemini-3.5-flash"
+MODEL = RAW_MODEL or "gemini-3.5-flash"
+ENABLE_SEARCH = os.environ.get("ENABLE_SEARCH", "0") == "1"
+DEBUG = os.environ.get("DEBUG", "0") == "1"
+
+THINK = {"default": "MINIMAL", "smart": "LOW", "pro": "MEDIUM", "pro+": "HIGH"}
+WAIT = {"default": 25, "smart": 30, "pro": 45, "pro+": 55}
+
+TOPIC_KEYWORDS: Dict[str, List[str]] = {
     "geography": [
         "географія", "материк", "океан", "море", "річка", "озеро", "гора",
         "клімат", "координати", "столиця", "країна", "регіон", "зона",
@@ -28,14 +48,14 @@ TOPIC_KEYWORDS = {
 }
 
 
-def detect_topics(query: str) -> list[str]:
+def detect_topics(query: str) -> List[str]:
     q = (query or "").lower()
     found = [t for t, words in TOPIC_KEYWORDS.items() if any(w in q for w in words)]
     return found or ["general"]
 
 
-def build_source_plan(topics: list[str]) -> list[str]:
-    plan = []
+def build_source_plan(topics: List[str]) -> List[str]:
+    plan: List[str] = []
     if "geography" in topics:
         plan.extend(["openstreetmap", "geonames", "wikipedia", "wikidata", "brave"])
     if "space_science" in topics:
@@ -49,14 +69,14 @@ def build_source_plan(topics: list[str]) -> list[str]:
     if "general" in topics:
         plan.extend(["wikipedia", "wikidata", "brave", "wolfram"])
 
-    out = []
+    out: List[str] = []
     for item in plan:
         if item not in out:
             out.append(item)
     return out
 
 
-def _get_json(url: str, headers: dict | None = None, timeout: float = 4.0):
+def _get_json(url: str, headers: Optional[Dict[str, str]] = None, timeout: float = 4.0):
     try:
         req_headers = {"User-Agent": "VasyaAI/1.0"}
         if headers:
@@ -71,7 +91,7 @@ def _get_json(url: str, headers: dict | None = None, timeout: float = 4.0):
 def collect_topic_context(query: str, max_items: int = 3) -> str:
     plan = build_source_plan(detect_topics(query))
     enc = urllib.parse.quote((query or "").strip())
-    notes = []
+    notes: List[str] = []
 
     for src in plan:
         if len(notes) >= max_items:
@@ -153,16 +173,7 @@ def collect_topic_context(query: str, max_items: int = 3) -> str:
                 notes.append(f"[{src.upper()}] Ключ підключено; запит: {query}")
 
     return "\n\n".join(notes)
-BASE_HW_RULES = (
-    " Допомагай зі шкільними завданнями (географія, історія, мова, література, математика, фізика, хімія, біологія та ін.). "
-    "Записуй дроби та формули через LaTeX: вбудовані як $\\frac{a}{b}$ та окремі як $$\\frac{a}{b}$$, не залишай незакритих знаків $. "
-    "Якщо передано графік — назви тип графіка, підписи осей та одиниці вимірювання, опиши тренд і ключові точки; якщо якесь значення дрібне або нечітке — чесно скажи про це, не вигадуй чисел. "
-    "Якщо передано таблицю — розбери стовпці й рядки, порівняй показники та знайди закономірності. "
-    "Коли питають про берегову лінію, материк, країну чи регіон — давай повний, структурований перелік (океани, моря, затоки, протоки, крайні точки та миси, острови/півострови), нічого не пропускаючи. "
-    "Коли просять есе чи твір — пиши живою, грамотною українською мовою, з вступом, аргументами, прикладами й висновком, без сухої канцелярщини. "
-    "Коли розбираєш задачі — пояснюй крок за кроком."
-)
-def _parse_data_url(data_url: str):
+def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
     m = re.match(r"^data:([^;]+);base64,(.+)$", data_url or "", re.DOTALL)
     if not m:
         return None
@@ -177,114 +188,6 @@ def _parse_data_url(data_url: str):
         return None
 
 
-@app.route("/api/chat", methods=["POST", "OPTIONS"])
-def chat():
-    if request.method == "OPTIONS":
-        return "", 204
-    if not API_KEY:
-        return err("Сервер не налаштований", 500)
-
-    data = request.get_json(silent=True) or {}
-    system_text = str(data.get("system") or "")[:4000]
-    mode = data.get("mode") if data.get("mode") in THINK else "default"
-    raw_msgs = data.get("messages")
-    contents = []
-    last_user_text = ""
-
-    if isinstance(raw_msgs, list):
-        for item in raw_msgs[-20:]:
-            if not isinstance(item, dict):
-                continue
-            role = "model" if item.get("role") == "assistant" else "user"
-            text = str(item.get("text") or "")[:8000]
-            parts = []
-            if text:
-                parts.append({"text": text})
-                if role == "user":
-                    last_user_text = text
-
-            att = item.get("attachment")
-            if isinstance(att, dict) and role == "user":
-                att_name = str(att.get("name") or "file")
-                att_type = str(att.get("type") or "")
-                att_text = str(att.get("textContent") or "")[:12000]
-                att_data_url = str(att.get("dataUrl") or "")
-
-                if att_type.startswith("image/") and att_data_url:
-                    parsed = _parse_data_url(att_data_url)
-                    if parsed:
-                        mime, clean_b64 = parsed
-                        parts.append({"inlineData": {"mimeType": mime, "data": clean_b64}})
-                        if not text:
-                            last_user_text = f"Проаналізуй зображення/графік/таблицю: {att_name}"
-                elif att_text:
-                    parts.append({"text": f"[Вкладений файл {att_name}]\n{att_text}"})
-                    if not text:
-                        last_user_text = f"Проаналізуй дані з файлу {att_name}"
-
-            if parts:
-                contents.append({"role": role, "parts": parts})
-
-    if not any(m["role"] == "user" for m in contents):
-        return err("Порожнє повідомлення", 400)
-
-    context_block = collect_topic_context(last_user_text, max_items=3)
-    merged_system = system_text
-    if context_block:
-        merged_system = (
-            f"{system_text}\n\nДовідковий контекст із підібраних джерел:\n{context_block}\n"
-            "Спирайся на цей контекст, якщо він відповідає питанню."
-        ).strip()
-
-    payload = {"contents": contents}
-    if merged_system:
-        payload["systemInstruction"] = {"parts": [{"text": merged_system}]}
-    if ENABLE_SEARCH:
-        payload["tools"] = [{"google_search": {}}]
-    if MODEL.startswith("gemini-3"):
-        payload["generationConfig"] = {"thinkingConfig": {"thinkingLevel": THINK[mode]}}
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-    headers = {"x-goog-api-key": API_KEY, "Content-Type": "application/json"}
-
-    last_status = None
-    last_detail = ""
-    for attempt in range(3):
-        try:
-            r = requests.post(url, headers=headers, json=payload, timeout=WAIT[mode])
-            if r.status_code == 200:
-                body = r.json()
-                candidates = body.get("candidates") or []
-                parts = (candidates[0].get("content") or {}).get("parts") or [] if candidates else []
-                text_out = "".join(str(p.get("text") or "") for p in parts if not p.get("thought"))
-                return jsonify({"reply": text_out.strip() or "Порожня відповідь"})
-
-            last_status = r.status_code
-            try:
-                last_detail = r.json().get("error", {}).get("message", "")
-            except Exception:
-                last_detail = r.text[:200]
-
-            if r.status_code in (429, 503) and attempt < 2:
-                time.sleep(0.8 * (2 ** attempt))
-                continue
-
-            print("MODEL ERROR", r.status_code, MODEL, last_detail)
-            if DEBUG:
-                return err(f"({r.status_code}) [{MODEL}]: {last_detail}", 502)
-            return err(f"Помилка сервера ({r.status_code}). Спробуй ще раз.", 502)
-        except requests.Timeout:
-            if attempt < 2:
-                time.sleep(0.6)
-                continue
-            return err("Відповідь зайняла забагато часу. Спробуй ще раз або обери інший режим.", 504)
-        except Exception as e:
-            print("SERVER ERROR", e)
-            if DEBUG:
-                return err(f"Помилка сервера: {e}", 500)
-            return err("Помилка сервера. Спробуй ще раз.", 500)
-
-    return err(f"Сервіс тимчасово перевантажений ({last_status or '503'}).", 503)
 PAGE = r'''<!doctype html>
 <html lang="uk">
 <head>
@@ -475,8 +378,7 @@ PAGE = r'''<!doctype html>
       "Коли питають про берегову лінію, материк, країну чи регіон — давай повний, структурований перелік (океани, моря, затоки, протоки, крайні точки та миси, острови/півострови), нічого не пропускаючи. " +
       "Коли просять есе чи твір — пиши живою, грамотною українською мовою, з вступом, аргументами, прикладами й висновком, без сухої канцелярщини. " +
       "Коли розбираєш задачі — пояснюй крок за кроком.";
-
-    const INSTR = {
+      const INSTR = {
       vasya: {
         "default": "Ти — Вася АІ. Відповідай чітко, повно і по суті, без зайвої води та вигаданих фактів." + BASE_HW_RULES,
         "smart": "Ти — Вася АІ у режимі Смарт. Розбирай задачу логічно й зрозуміло, перевіряй кроки та факти." + BASE_HW_RULES,
@@ -639,7 +541,6 @@ PAGE = r'''<!doctype html>
         b.onclick = () => { selectChat(c.id); toggleMenu(false); };
         sideList.appendChild(b);
       });
-
       const quotaBox = document.getElementById("quotaBox");
       if (m.limit == null) {
         quotaBox.textContent = `Вася ${m.sfx}: безліміт`;
@@ -768,3 +669,147 @@ PAGE = r'''<!doctype html>
 </body>
 </html>
 '''
+@app.after_request
+def cors(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    return resp
+
+
+def err(msg, code):
+    return jsonify({"error": msg}), code
+
+
+@app.route("/", methods=["GET"])
+def index():
+    return Response(PAGE, mimetype="text/html")
+
+
+@app.route("/icon.png", methods=["GET"])
+@app.route("/favicon.ico", methods=["GET"])
+def icon():
+    return send_from_directory(BASE, "icon.png", mimetype="image/png")
+
+
+@app.route("/api/index", methods=["GET", "POST", "OPTIONS"])
+def index_or_chat():
+    if request.method == "GET":
+        return Response(PAGE, mimetype="text/html")
+    return chat()
+
+
+@app.route("/api/chat", methods=["POST", "OPTIONS"])
+def chat():
+    if request.method == "OPTIONS":
+        return "", 204
+    if not API_KEY:
+        return err("Сервер не налаштований", 500)
+
+    data = request.get_json(silent=True) or {}
+    system_text = str(data.get("system") or "")[:4000]
+    mode = data.get("mode") if data.get("mode") in THINK else "default"
+    raw_msgs = data.get("messages")
+    contents = []
+    last_user_text = ""
+
+    if isinstance(raw_msgs, list):
+        for item in raw_msgs[-20:]:
+            if not isinstance(item, dict):
+                continue
+            role = "model" if item.get("role") == "assistant" else "user"
+            text = str(item.get("text") or "")[:8000]
+            parts = []
+            if text:
+                parts.append({"text": text})
+                if role == "user":
+                    last_user_text = text
+
+            att = item.get("attachment")
+            if isinstance(att, dict) and role == "user":
+                att_name = str(att.get("name") or "file")
+                att_type = str(att.get("type") or "")
+                att_text = str(att.get("textContent") or "")[:12000]
+                att_data_url = str(att.get("dataUrl") or "")
+
+                if att_type.startswith("image/") and att_data_url:
+                    parsed = _parse_data_url(att_data_url)
+                    if parsed:
+                        mime, clean_b64 = parsed
+                        parts.append({"inlineData": {"mimeType": mime, "data": clean_b64}})
+                        if not text:
+                            last_user_text = f"Проаналізуй зображення/графік/таблицю: {att_name}"
+                elif att_text:
+                    parts.append({"text": f"[Вкладений файл {att_name}]\n{att_text}"})
+                    if not text:
+                        last_user_text = f"Проаналізуй дані з файлу {att_name}"
+
+            if parts:
+                contents.append({"role": role, "parts": parts})
+
+    if not any(m["role"] == "user" for m in contents):
+        return err("Порожнє повідомлення", 400)
+
+    context_block = collect_topic_context(last_user_text, max_items=3)
+    merged_system = system_text
+    if context_block:
+        merged_system = (
+            f"{system_text}\n\nДовідковий контекст із підібраних джерел:\n{context_block}\n"
+            "Спирайся на цей контекст, якщо він відповідає питанню."
+        ).strip()
+
+    payload = {"contents": contents}
+    if merged_system:
+        payload["systemInstruction"] = {"parts": [{"text": merged_system}]}
+    if ENABLE_SEARCH:
+        payload["tools"] = [{"google_search": {}}]
+    if MODEL.startswith("gemini-3"):
+        payload["generationConfig"] = {"thinkingConfig": {"thinkingLevel": THINK[mode]}}
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+    headers = {"x-goog-api-key": API_KEY, "Content-Type": "application/json"}
+
+    last_status = None
+    last_detail = ""
+    for attempt in range(3):
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=WAIT[mode])
+            if r.status_code == 200:
+                body = r.json()
+                candidates = body.get("candidates") or []
+                parts = (candidates[0].get("content") or {}).get("parts") or [] if candidates else []
+                text_out = "".join(str(p.get("text") or "") for p in parts if not p.get("thought"))
+                return jsonify({"reply": text_out.strip() or "Порожня відповідь"})
+
+            last_status = r.status_code
+            try:
+                last_detail = r.json().get("error", {}).get("message", "")
+            except Exception:
+                last_detail = r.text[:200]
+
+            if r.status_code in (429, 503) and attempt < 2:
+                time.sleep(0.8 * (2 ** attempt))
+                continue
+
+            print("MODEL ERROR", r.status_code, MODEL, last_detail)
+            if DEBUG:
+                return err(f"({r.status_code}) [{MODEL}]: {last_detail}", 502)
+            return err(f"Помилка сервера ({r.status_code}). Спробуй ще раз.", 502)
+        except requests.Timeout:
+            if attempt < 2:
+                time.sleep(0.6)
+                continue
+            return err("Відповідь зайняла забагато часу. Спробуй ще раз або обери інший режим.", 504)
+        except Exception as e:
+            print("SERVER ERROR", e)
+            if DEBUG:
+                return err(f"Помилка сервера: {e}", 500)
+            return err("Помилка сервера. Спробуй ще раз.", 500)
+
+    return err(f"Сервіс тимчасово перевантажений ({last_status or '503'}).", 503)
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+    

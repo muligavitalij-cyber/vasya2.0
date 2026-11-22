@@ -52,9 +52,8 @@ OPENROUTER_DEFAULT_MODEL = (os.environ.get("OPENROUTER_MODEL") or "").strip().lo
 OPENROUTER_FAST_MODEL = "google/gemma-4-26b-a4b-it:free"
 OPENROUTER_SMART_MODEL = "google/gemma-4-31b-it:free"
 OPENROUTER_BACKUP_MODELS: List[str] = [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "mistralai/mistral-small-3.1-24b-instruct:free",
-    "qwen/qwen3-coder:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it:free",
 ]
 
 TOPIC_KEYWORDS: Dict[str, List[str]] = {
@@ -846,7 +845,8 @@ def _pick_openrouter_models(mode: str, query_text: str) -> List[str]:
 
 
 def call_openrouter_fallback(raw_msgs, system_text: str, mode: str, query_text: str, context_block: str = ""):
-    if not OPENROUTER_KEYS:
+    keys = _load_openrouter_keys()
+    if not keys:
         return None, "Не задано жодного ключа OpenRouter"
 
     models = _pick_openrouter_models(mode, query_text)
@@ -858,17 +858,17 @@ def call_openrouter_fallback(raw_msgs, system_text: str, mode: str, query_text: 
         return None, "Порожні повідомлення для OpenRouter"
 
     started_at = time.monotonic()
-    max_total_budget = min(float(WAIT.get(mode, 25)) - 2.0, 20.0)
+    max_total_budget = min(float(WAIT.get(mode, 25)) - 2.0, 22.0)
     last_err = "Усі моделі та ключі OpenRouter не відповіли"
 
     for model_id in models:
-        for api_key in OPENROUTER_KEYS:
+        for api_key in keys:
             elapsed = time.monotonic() - started_at
             remaining = max_total_budget - elapsed
-            if remaining < 3.5:
+            if remaining < 2.5:
                 return None, f"Замало часу до ліміту відповіді ({last_err})"
 
-            per_call_timeout = min(7.0, max(3.5, remaining))
+            per_call_timeout = min(6.0, max(2.5, remaining - 0.5))
             payload = {
                 "model": model_id,
                 "messages": messages,
@@ -910,9 +910,6 @@ def call_openrouter_fallback(raw_msgs, system_text: str, mode: str, query_text: 
                 except Exception:
                     detail = r.text[:180]
                 last_err = f"[{model_id}] HTTP {r.status_code}: {detail}"
-
-                if r.status_code in (401, 402, 403, 400, 404, 422):
-                    break
                 continue
             except requests.Timeout:
                 last_err = f"[{model_id}] таймаут"
@@ -1080,4 +1077,4 @@ def chat():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-    
+                    

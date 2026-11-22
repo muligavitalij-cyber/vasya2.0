@@ -6,12 +6,12 @@ app = Flask(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 
 API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
-RAW_MODEL = (os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash").strip()
+RAW_MODEL = (os.environ.get("GEMINI_MODEL") or "gemini-3.7-flash").strip()
 if RAW_MODEL.startswith("models/"):
     RAW_MODEL = RAW_MODEL[len("models/"):]
 if RAW_MODEL.startswith("deepseek"):
-    RAW_MODEL = "gemini-3.8-flash"
-MODEL = RAW_MODEL or "gemini-3.8-flash"
+    RAW_MODEL = "gemini-3.7-flash"
+MODEL = RAW_MODEL or "gemini-3.7-flash"
 ENABLE_SEARCH = os.environ.get("ENABLE_SEARCH", "0") == "1"
 
 # ---- Сторінка сайту ----

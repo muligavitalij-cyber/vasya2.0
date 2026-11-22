@@ -12,13 +12,14 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 app = Flask(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 
+DISABLE_GEMINI = os.environ.get("DISABLE_GEMINI", "1") == "1"
 API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
-RAW_MODEL = (os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash").strip()
+RAW_MODEL = (os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash").strip()
 if RAW_MODEL.startswith("models/"):
     RAW_MODEL = RAW_MODEL[len("models/"):]
 if RAW_MODEL.startswith("deepseek"):
-    RAW_MODEL = "gemini-3.5-flash"
-MODEL = RAW_MODEL or "gemini-3.5-flash"
+    RAW_MODEL = "gemini-2.5-flash"
+MODEL = RAW_MODEL or "gemini-2.5-flash"
 ENABLE_SEARCH = os.environ.get("ENABLE_SEARCH", "0") == "1"
 DEBUG = os.environ.get("DEBUG", "0") == "1"
 
@@ -50,6 +51,11 @@ OPENROUTER_KEYS = _load_openrouter_keys()
 OPENROUTER_DEFAULT_MODEL = (os.environ.get("OPENROUTER_MODEL") or "").strip().lower()
 OPENROUTER_FAST_MODEL = "google/gemma-4-26b-a4b-it:free"
 OPENROUTER_SMART_MODEL = "google/gemma-4-31b-it:free"
+OPENROUTER_BACKUP_MODELS: List[str] = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "qwen/qwen3-coder:free",
+]
 
 TOPIC_KEYWORDS: Dict[str, List[str]] = {
     "geography": [
@@ -214,8 +220,6 @@ def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
         return mime, base64.b64encode(raw).decode("ascii")
     except Exception:
         return None
-
-
 PAGE = r'''<!doctype html>
 <html lang="uk">
 <head>
@@ -754,8 +758,6 @@ PAGE = r'''<!doctype html>
 </body>
 </html>
 '''
-
-
 def _build_openrouter_messages(raw_msgs, system_text: str, context_block: str = "") -> List[dict]:
     out: List[dict] = []
 
@@ -833,6 +835,8 @@ def _pick_openrouter_models(mode: str, query_text: str) -> List[str]:
     else:
         ordered.extend([OPENROUTER_FAST_MODEL, OPENROUTER_SMART_MODEL])
 
+    ordered.extend(OPENROUTER_BACKUP_MODELS)
+
     final_models: List[str] = []
     for m in ordered:
         clean = (m or "").strip().lower()
@@ -854,17 +858,17 @@ def call_openrouter_fallback(raw_msgs, system_text: str, mode: str, query_text: 
         return None, "Порожні повідомлення для OpenRouter"
 
     started_at = time.monotonic()
-    max_total_budget = min(float(WAIT.get(mode, 25)) - 2.0, 22.0)
+    max_total_budget = min(float(WAIT.get(mode, 25)) - 2.0, 20.0)
     last_err = "Усі моделі та ключі OpenRouter не відповіли"
 
     for model_id in models:
         for api_key in OPENROUTER_KEYS:
             elapsed = time.monotonic() - started_at
             remaining = max_total_budget - elapsed
-            if remaining < 4.0:
+            if remaining < 3.5:
                 return None, f"Замало часу до ліміту відповіді ({last_err})"
 
-            per_call_timeout = min(11.0, max(4.0, remaining))
+            per_call_timeout = min(7.0, max(3.5, remaining))
             payload = {
                 "model": model_id,
                 "messages": messages,
@@ -1010,8 +1014,9 @@ def chat():
             "Спирайся на цей контекст, якщо він відповідає питанню."
         ).strip()
 
-    gemini_failed_reason = ""
-    if API_KEY:
+    gemini_failed_reason = "Gemini вимкнено (DISABLE_GEMINI=1)"
+    if not DISABLE_GEMINI and API_KEY:
+        gemini_failed_reason = ""
         payload = {"contents": contents}
         if merged_system:
             payload["systemInstruction"] = {"parts": [{"text": merged_system}]}
@@ -1054,7 +1059,7 @@ def chat():
             except Exception as e:
                 gemini_failed_reason = f"Gemini помилка: {e}"
                 break
-    else:
+    elif not API_KEY:
         gemini_failed_reason = "GEMINI_API_KEY не задано"
 
     fb_reply, fb_err = call_openrouter_fallback(

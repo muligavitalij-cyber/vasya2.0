@@ -34,14 +34,14 @@ def _load_openrouter_keys() -> List[str]:
                 keys.append(clean)
     return keys
 
-
 OPENROUTER_KEYS = _load_openrouter_keys()
 OPENROUTER_DEFAULT_MODEL = (os.environ.get("OPENROUTER_MODEL") or "").strip().lower()
 OPENROUTER_FAST_MODEL = "google/gemma-4-26b-a4b-it:free"
 OPENROUTER_SMART_MODEL = "google/gemma-4-31b-it:free"
 OPENROUTER_BACKUP_MODELS: List[str] = [
-    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3.5-lightning:free",
     "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
 ]
 
 TOPIC_KEYWORDS: Dict[str, List[str]] = {

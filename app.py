@@ -947,5 +947,56 @@ def chat():
 
     data = request.get_json(silent=True) or {}
     system_text = str(data.get("system") or "")[:4000]
-    mode = data.get("mode") if data.get("mode
+        mode = data.get("mode") if data.get("mode") in ("default", "smart", "pro", "pro+") else "default"
+    raw_msgs = data.get("messages")
+    last_user_text = ""
+    has_user_msg = False
+
+    if isinstance(raw_msgs, list):
+        for item in raw_msgs[-20:]:
+            if not isinstance(item, dict):
+                continue
+            role = "assistant" if item.get("role") == "assistant" else "user"
+            text = str(item.get("text") or "")[:8000]
+            att = item.get("attachment")
+            has_att = isinstance(att, dict) and role == "user" and (
+                (str(att.get("type") or "").startswith("image/") and bool(str(att.get("dataUrl") or "").strip()))
+                or bool(str(att.get("textContent") or "").strip())
+            )
+
+            if text or has_att:
+                if role == "user":
+                    has_user_msg = True
+                    if text:
+                        last_user_text = text
+                    elif has_att:
+                        att_name = str(att.get("name") or "file")
+                        last_user_text = f"Проаналізуй вкладення: {att_name}"
+
+    if not has_user_msg:
+        return err("Порожнє повідомлення", 400)
+
+    context_block = ""
+    if detect_topics(last_user_text) != ["general"]:
+        context_block = collect_topic_context(last_user_text, max_items=2)
+
+    fb_reply, fb_err = call_openrouter_fallback(
+        raw_msgs=raw_msgs,
+        system_text=system_text,
+        mode=mode,
+        query_text=last_user_text,
+        context_block=context_block,
+    )
+    if fb_reply:
+        return jsonify({"reply": fb_reply})
+
+    if DEBUG:
+        return err(f"OpenRouter: {fb_err}", 502)
+    return err("Сервіс тимчасово перевантажений. Спробуй ще раз за кілька секунд.", 503)
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+        
     

@@ -5,10 +5,14 @@ from flask import Flask, request, jsonify, Response, send_from_directory
 app = Flask(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 
-API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("GEMINI_API_KEY")
-MODEL = os.environ.get("DEEPSEEK_MODEL") or os.environ.get("GEMINI_MODEL", "deepseek-chat")
-if MODEL.startswith("gemini"):
-    MODEL = "deepseek-chat"
+API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
+RAW_MODEL = (os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+if RAW_MODEL.startswith("models/"):
+    RAW_MODEL = RAW_MODEL[len("models/"):]
+if RAW_MODEL.startswith("deepseek"):
+    RAW_MODEL = "gemini-2.5-flash"
+MODEL = RAW_MODEL or "gemini-2.5-flash"
+ENABLE_SEARCH = os.environ.get("ENABLE_SEARCH", "0") == "1"
 
 # ---- Сторінка сайту ----
 PAGE = r'''<!doctype html>
@@ -48,7 +52,7 @@ PAGE = r'''<!doctype html>
     .assistant { background: #232323; align-self: flex-start; max-width: 88%; border: 1px solid #333; }
     .thinking { background: #1c241e; color: #9fd8ad; border-color: #2c4733; font-style: italic; }
     .who { font-size: 12px; opacity: 0.75; margin-bottom: 4px; }
-    .error { background: #5a1d1d; color: #ffd6d6; padding: 10px; border-radius: 6px; margin-bottom: 12px; display: none; }
+    .error { background: #5a1d1d; color: #ffd6d6; padding: 10px; border-radius: 6px; margin-bottom: 12px; display: none; word-break: break-word; }
     .send-form { display: flex; gap: 8px; }
     .send-form input { flex: 1; }
   </style>
@@ -200,8 +204,8 @@ PAGE = r'''<!doctype html>
       c.mode = mode;
       saveState();
       render();
-  }
-      function render() {
+    }
+        function render() {
       const chat = getActiveChat();
       const m = MODES[chat.mode] || MODES.default;
       document.getElementById("modeSelect").value = chat.mode;
@@ -354,49 +358,55 @@ def chat():
         return "", 204
 
     if not API_KEY:
-        return err("На сервері не задано ключ API", 500)
+        return err("На сервері не задано GEMINI_API_KEY", 500)
 
     data = request.get_json(silent=True) or {}
     system_text = str(data.get("system") or "")[:4000]
     raw_msgs = data.get("messages")
-    chat_msgs = []
-
-    if system_text:
-        chat_msgs.append({"role": "system", "content": system_text})
+    contents = []
 
     if isinstance(raw_msgs, list):
         for item in raw_msgs[-20:]:
             if isinstance(item, dict):
-                role = "assistant" if item.get("role") == "assistant" else "user"
+                role = "model" if item.get("role") == "assistant" else "user"
                 text = str(item.get("text") or "")[:8000]
                 if text:
-                    chat_msgs.append({"role": role, "content": text})
+                    contents.append({"role": role, "parts": [{"text": text}]})
 
-    if not any(m["role"] == "user" for m in chat_msgs):
+    if not any(m["role"] == "user" for m in contents):
         return err("Порожнє повідомлення", 400)
 
-    payload = {
-        "model": MODEL,
-        "messages": chat_msgs,
-    }
+    payload = {"contents": contents}
+    if system_text:
+        payload["systemInstruction"] = {"parts": [{"text": system_text}]}
+    if ENABLE_SEARCH:
+        payload["tools"] = [{"google_search": {}}]
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
 
     try:
         r = requests.post(
-            "https://api.deepseek.com/chat/completions",
+            url,
             headers={
-                "Authorization": f"Bearer {API_KEY}",
+                "x-goog-api-key": API_KEY,
                 "Content-Type": "application/json",
             },
             json=payload,
             timeout=25,
         )
         if r.status_code != 200:
-            return err(f"Помилка моделі ({r.status_code}). Спробуй ще раз.", 502)
+            detail = ""
+            try:
+                err_data = r.json()
+                detail = err_data.get("error", {}).get("message", "")
+            except Exception:
+                detail = r.text[:200]
+            return err(f"Gemini ({r.status_code}) [{MODEL}]: {detail}", 502)
 
         body = r.json()
-        choices = body.get("choices") or []
-        msg = (choices[0].get("message") or {}) if choices else {}
-        text_out = str(msg.get("content") or "")
+        candidates = body.get("candidates") or []
+        parts = (candidates[0].get("content") or {}).get("parts") or [] if candidates else []
+        text_out = "".join(str(p.get("text") or "") for p in parts)
         return jsonify({"reply": text_out.strip() or "Порожня відповідь"})
     except requests.Timeout:
         return err("Відповідь зайняла забагато часу. Спробуй ще раз.", 504)
@@ -407,3 +417,4 @@ def chat():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+    

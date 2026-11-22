@@ -6,13 +6,18 @@ app = Flask(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 
 API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
-RAW_MODEL = (os.environ.get("GEMINI_MODEL") or "gemini-3.7-flash").strip()
+RAW_MODEL = (os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash").strip()
 if RAW_MODEL.startswith("models/"):
     RAW_MODEL = RAW_MODEL[len("models/"):]
 if RAW_MODEL.startswith("deepseek"):
-    RAW_MODEL = "gemini-3.7-flash"
-MODEL = RAW_MODEL or "gemini-3.7-flash"
+    RAW_MODEL = "gemini-3.5-flash"
+MODEL = RAW_MODEL or "gemini-3.5-flash"
 ENABLE_SEARCH = os.environ.get("ENABLE_SEARCH", "0") == "1"
+DEBUG = os.environ.get("DEBUG", "0") == "1"  # DEBUG=1 у Vercel показує деталі помилок на сайті
+
+# Скільки «думає» модель залежно від режиму (чим вище, тим довше й ретельніше)
+THINK = {"default": "MINIMAL", "smart": "LOW", "pro": "MEDIUM", "pro+": "HIGH"}
+WAIT = {"default": 25, "smart": 30, "pro": 45, "pro+": 55}
 
 # ---- Сторінка сайту ----
 PAGE = r'''<!doctype html>
@@ -110,7 +115,6 @@ PAGE = r'''<!doctype html>
         "pro+": "Ти — Вася АІ у режимі Про+. Працюй максимально ретельно й детально: охоплюй усі нюанси, перевіряй логіку й подавай матеріал чітко." + BASE_HW_RULES
       }
     };
-
     let isThinking = false, thinkSeconds = 0, thinkTimer = null;
     const ukey = (b, m) => m;
 
@@ -205,7 +209,8 @@ PAGE = r'''<!doctype html>
       saveState();
       render();
     }
-        function render() {
+
+    function render() {
       const chat = getActiveChat();
       const m = MODES[chat.mode] || MODES.default;
       document.getElementById("modeSelect").value = chat.mode;
@@ -257,12 +262,13 @@ PAGE = r'''<!doctype html>
       msgBox.scrollTop = msgBox.scrollHeight;
     }
 
-    async function askInstruction(instruction, messages) {
+    async function askInstruction(instruction, messages, mode) {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           system: instruction,
+          mode: mode,
           messages: messages.map((m) => ({ role: m.role, text: m.text }))
         })
       });
@@ -299,7 +305,7 @@ PAGE = r'''<!doctype html>
 
       try {
         const sys = (INSTR.vasya && INSTR.vasya[chat.mode]) || INSTR.vasya.default;
-        const reply = await askInstruction(sys, chat.messages);
+        const reply = await askInstruction(sys, chat.messages, chat.mode);
         chat.messages.push({ role: "assistant", text: reply });
         if (m.limit != null) state.usage[k] = (state.usage[k] || 0) + 1;
         saveState();
@@ -320,7 +326,6 @@ PAGE = r'''<!doctype html>
 </body>
 </html>
 '''
-
 
 @app.after_request
 def cors(resp):
@@ -358,10 +363,11 @@ def chat():
         return "", 204
 
     if not API_KEY:
-        return err("На сервері не задано GEMINI_API_KEY", 500)
+        return err("Сервер не налаштований", 500)
 
     data = request.get_json(silent=True) or {}
     system_text = str(data.get("system") or "")[:4000]
+    mode = data.get("mode") if data.get("mode") in THINK else "default"
     raw_msgs = data.get("messages")
     contents = []
 
@@ -381,6 +387,9 @@ def chat():
         payload["systemInstruction"] = {"parts": [{"text": system_text}]}
     if ENABLE_SEARCH:
         payload["tools"] = [{"google_search": {}}]
+    # Для моделей третього покоління швидкість керується рівнем «роздумів»
+    if MODEL.startswith("gemini-3"):
+        payload["generationConfig"] = {"thinkingConfig": {"thinkingLevel": THINK[mode]}}
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
 
@@ -392,7 +401,7 @@ def chat():
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=45,
+            timeout=WAIT[mode],
         )
         if r.status_code != 200:
             detail = ""
@@ -401,20 +410,25 @@ def chat():
                 detail = err_data.get("error", {}).get("message", "")
             except Exception:
                 detail = r.text[:200]
-            return err(f"Gemini ({r.status_code}) [{MODEL}]: {detail}", 502)
+            print("MODEL ERROR", r.status_code, MODEL, detail)  # деталі завжди в журналі Vercel
+            if DEBUG:
+                return err(f"({r.status_code}) [{MODEL}]: {detail}", 502)
+            return err(f"Помилка сервера ({r.status_code}). Спробуй ще раз.", 502)
 
         body = r.json()
         candidates = body.get("candidates") or []
         parts = (candidates[0].get("content") or {}).get("parts") or [] if candidates else []
-        text_out = "".join(str(p.get("text") or "") for p in parts)
+        text_out = "".join(str(p.get("text") or "") for p in parts if not p.get("thought"))
         return jsonify({"reply": text_out.strip() or "Порожня відповідь"})
     except requests.Timeout:
-        return err("Відповідь зайняла забагато часу. Спробуй ще раз.", 504)
+        return err("Відповідь зайняла забагато часу. Спробуй ще раз або обери режим швидше.", 504)
     except Exception as e:
-        return err(f"Помилка сервера: {e}", 500)
+        print("SERVER ERROR", e)
+        if DEBUG:
+            return err(f"Помилка сервера: {e}", 500)
+        return err("Помилка сервера. Спробуй ще раз.", 500)
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-    

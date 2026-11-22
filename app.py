@@ -214,6 +214,8 @@ def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
         return mime, base64.b64encode(raw).decode("ascii")
     except Exception:
         return None
+
+
 PAGE = r'''<!doctype html>
 <html lang="uk">
 <head>
@@ -322,14 +324,15 @@ PAGE = r'''<!doctype html>
     .messages { display: flex; flex-direction: column; gap: 12px; margin-bottom: 14px; }
     .msg-wrap { display: flex; flex-direction: column; max-width: 92%; }
     .msg-wrap.user { align-self: flex-end; }
-    .msg-wrap.assistant { align-self: flex-start; }
-    .msg { padding: 11px 13px; border-radius: 10px; line-height: 1.5; overflow-x: auto; }
+    .msg-wrap.assistant, .msg-wrap.error { align-self: flex-start; }
+    .msg { padding: 11px 13px; border-radius: 10px; line-height: 1.5; overflow-x: auto; word-break: break-word; }
     .user .msg { background: var(--user); }
     .assistant .msg { background: var(--card); border: 1px solid var(--border); }
+    .error-msg { background: #4c1b1b; border: 1px solid #9e3434; color: #ffd9d9; }
+    .retry-btn { margin-top: 8px; padding: 6px 10px; font-size: 13px; background: #7a2626; border-radius: 7px; }
     .thinking { background: #1c241e !important; color: #9fd8ad; border-color: #2c4733 !important; font-style: italic; }
     .who { font-size: 12px; opacity: 0.75; margin-bottom: 4px; }
     .ai-note { font-size: 12px; color: var(--muted); margin-top: 4px; padding-left: 4px; }
-    .error { background: #5a1d1d; color: #ffd6d6; padding: 10px; border-radius: 8px; margin-bottom: 12px; display: none; word-break: break-word; }
     .attach-preview { font-size: 12px; color: #b7f5c8; margin-bottom: 8px; display: none; }
     .send-form {
       position: fixed;
@@ -370,7 +373,6 @@ PAGE = r'''<!doctype html>
       </select>
     </div>
 
-    <div class="error" id="errorBox"></div>
     <div class="quota" id="quotaBox"></div>
     <div class="messages" id="messagesBox"></div>
   </div>
@@ -456,17 +458,6 @@ PAGE = r'''<!doctype html>
       const c = state.chats[state.activeChatId];
       if (!MODES[c.mode]) c.mode = "default";
       return c;
-    }
-
-    function showError(msg) {
-      const box = document.getElementById("errorBox");
-      if (!msg) {
-        box.style.display = "none";
-        box.textContent = "";
-        return;
-      }
-      box.style.display = "block";
-      box.textContent = msg;
     }
 
     function handleFileSelect(ev) {
@@ -582,6 +573,37 @@ PAGE = r'''<!doctype html>
       msgBox.innerHTML = "";
 
       for (const item of (chat.messages || [])) {
+        if (item.role === "error") {
+          const wrap = document.createElement("div");
+          wrap.className = "msg-wrap error";
+
+          const div = document.createElement("div");
+          div.className = "msg error-msg";
+
+          const who = document.createElement("div");
+          who.className = "who";
+          who.textContent = "Вася";
+          div.appendChild(who);
+
+          const body = document.createElement("div");
+          body.textContent = item.text || "Помилка запиту.";
+          div.appendChild(body);
+
+          if (item.retryText || item.retryAttachment) {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "retry-btn";
+            btn.textContent = "Повторити";
+            btn.disabled = isThinking;
+            btn.onclick = () => retryMessage(item.retryText || "", item.retryAttachment || null);
+            div.appendChild(btn);
+          }
+
+          wrap.appendChild(div);
+          msgBox.appendChild(wrap);
+          continue;
+        }
+
         const wrap = document.createElement("div");
         wrap.className = "msg-wrap " + (item.role === "user" ? "user" : "assistant");
 
@@ -623,17 +645,21 @@ PAGE = r'''<!doctype html>
     }
 
     async function askInstruction(instruction, messages, mode) {
+      const apiMessages = messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          role: m.role,
+          text: m.text,
+          attachment: m.attachment || null
+        }));
+
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           system: instruction,
           mode: mode,
-          messages: messages.map((m) => ({
-            role: m.role,
-            text: m.text,
-            attachment: m.attachment || null
-          }))
+          messages: apiMessages
         })
       });
       let data = {};
@@ -642,33 +668,38 @@ PAGE = r'''<!doctype html>
       return data.reply || data.text || "Порожня відповідь";
     }
 
-    async function handleSend(e) {
-      e.preventDefault();
+    async function sendPrompt(text, attachment, clearInputAfter = false) {
       if (isThinking) return;
-      showError("");
+      if (!text && !attachment) return;
 
       const chat = getActiveChat();
       const m = MODES[chat.mode] || MODES.default;
-      const input = document.getElementById("msgInput");
-      const text = input.value.trim();
-      if (!text && !pendingAttachment) return;
 
       if (m.limit != null && (state.usage[chat.mode] || 0) >= m.limit) {
-        showError(`Ліміт для режиму ${m.sfx} вичерпано.`);
+        chat.messages.push({
+          role: "error",
+          text: `Ліміт для режиму ${m.sfx} вичерпано.`,
+          retryText: "",
+          retryAttachment: null
+        });
+        saveState();
+        await render();
         return;
       }
 
       const firstTitle = chat.title === "Новий чат";
-      const displayText = text || (pendingAttachment ? `Файл: ${pendingAttachment.name}` : "");
-      chat.messages.push({ role: "user", text: displayText, attachment: pendingAttachment });
-      if (firstTitle) chat.title = (text || pendingAttachment.name || "Чат").slice(0, 32);
+      const displayText = text || (attachment ? `Файл: ${attachment.name}` : "");
+      chat.messages.push({ role: "user", text: displayText, attachment: attachment || null });
+      if (firstTitle) chat.title = (text || (attachment && attachment.name) || "Чат").slice(0, 32);
 
-      input.value = "";
-      pendingAttachment = null;
-      document.getElementById("fileInput").value = "";
-      const prev = document.getElementById("attachPreview");
-      prev.style.display = "none";
-      prev.textContent = "";
+      if (clearInputAfter) {
+        document.getElementById("msgInput").value = "";
+        pendingAttachment = null;
+        document.getElementById("fileInput").value = "";
+        const prev = document.getElementById("attachPreview");
+        prev.style.display = "none";
+        prev.textContent = "";
+      }
 
       saveState();
       startThinking();
@@ -681,15 +712,41 @@ PAGE = r'''<!doctype html>
         if (m.limit != null) state.usage[chat.mode] = (state.usage[chat.mode] || 0) + 1;
         saveState();
       } catch (err) {
-        chat.messages.pop();
-        if (firstTitle && !chat.messages.length) chat.title = "Новий чат";
-        input.value = text;
+        chat.messages.push({
+          role: "error",
+          text: "Помилка запиту: " + err.message,
+          retryText: text,
+          retryAttachment: attachment || null
+        });
         saveState();
-        showError("Помилка запиту: " + err.message);
       } finally {
         stopThinking();
         await render();
       }
+    }
+
+    async function retryMessage(retryText, retryAttachment) {
+      if (isThinking) return;
+      const chat = getActiveChat();
+      const last = chat.messages[chat.messages.length - 1];
+      if (last && last.role === "error") {
+        chat.messages.pop();
+      }
+      const prevUser = chat.messages[chat.messages.length - 1];
+      if (prevUser && prevUser.role === "user") {
+        chat.messages.pop();
+      }
+      saveState();
+      await sendPrompt(retryText, retryAttachment, false);
+    }
+
+    async function handleSend(e) {
+      e.preventDefault();
+      if (isThinking) return;
+      const input = document.getElementById("msgInput");
+      const text = input.value.trim();
+      const att = pendingAttachment;
+      await sendPrompt(text, att, true);
     }
 
     render();
@@ -697,6 +754,8 @@ PAGE = r'''<!doctype html>
 </body>
 </html>
 '''
+
+
 def _build_openrouter_messages(raw_msgs, system_text: str, context_block: str = "") -> List[dict]:
     out: List[dict] = []
 
@@ -1016,4 +1075,4 @@ def chat():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-            
+    

@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from flask import Flask, request, jsonify, Response, send_from_directory
 
@@ -115,6 +116,7 @@ PAGE = r'''<!doctype html>
         "pro+": "Ти — Вася АІ у режимі Про+. Працюй максимально ретельно й детально: охоплюй усі нюанси, перевіряй логіку й подавай матеріал чітко." + BASE_HW_RULES
       }
     };
+
     let isThinking = false, thinkSeconds = 0, thinkTimer = null;
     const ukey = (b, m) => m;
 
@@ -326,7 +328,6 @@ PAGE = r'''<!doctype html>
 </body>
 </html>
 '''
-
 @app.after_request
 def cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -393,42 +394,58 @@ def chat():
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
 
-    try:
-        r = requests.post(
-            url,
-            headers={
-                "x-goog-api-key": API_KEY,
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=WAIT[mode],
-        )
-        if r.status_code != 200:
-            detail = ""
-            try:
-                err_data = r.json()
-                detail = err_data.get("error", {}).get("message", "")
-            except Exception:
-                detail = r.text[:200]
-            print("MODEL ERROR", r.status_code, MODEL, detail)  # деталі завжди в журналі Vercel
-            if DEBUG:
-                return err(f"({r.status_code}) [{MODEL}]: {detail}", 502)
-            return err(f"Помилка сервера ({r.status_code}). Спробуй ще раз.", 502)
+    max_retries = 3
+    r = None
 
-        body = r.json()
-        candidates = body.get("candidates") or []
-        parts = (candidates[0].get("content") or {}).get("parts") or [] if candidates else []
-        text_out = "".join(str(p.get("text") or "") for p in parts if not p.get("thought"))
-        return jsonify({"reply": text_out.strip() or "Порожня відповідь"})
-    except requests.Timeout:
-        return err("Відповідь зайняла забагато часу. Спробуй ще раз або обери режим швидше.", 504)
-    except Exception as e:
-        print("SERVER ERROR", e)
+    for attempt in range(max_retries):
+        try:
+            r = requests.post(
+                url,
+                headers={
+                    "x-goog-api-key": API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=WAIT[mode],
+            )
+            if r.status_code in (429, 503) and attempt < max_retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            break
+        except requests.Timeout:
+            if attempt < max_retries - 1:
+                time.sleep(1.5)
+                continue
+            return err("Відповідь зайняла забагато часу. Спробуй ще раз або обери режим швидше.", 504)
+        except Exception as e:
+            print("SERVER ERROR", e)
+            if DEBUG:
+                return err(f"Помилка сервера: {e}", 500)
+            return err("Помилка сервера. Спробуй ще раз.", 500)
+
+    if r is None:
+        return err("Помилка сервера. Спробуй ще раз.", 502)
+
+    if r.status_code != 200:
+        detail = ""
+        try:
+            err_data = r.json()
+            detail = err_data.get("error", {}).get("message", "")
+        except Exception:
+            detail = r.text[:200]
+        print("MODEL ERROR", r.status_code, MODEL, detail)
         if DEBUG:
-            return err(f"Помилка сервера: {e}", 500)
-        return err("Помилка сервера. Спробуй ще раз.", 500)
+            return err(f"({r.status_code}) [{MODEL}]: {detail}", 502)
+        return err(f"Помилка сервера ({r.status_code}). Спробуй ще раз.", 502)
+
+    body = r.json()
+    candidates = body.get("candidates") or []
+    parts = (candidates[0].get("content") or {}).get("parts") or [] if candidates else []
+    text_out = "".join(str(p.get("text") or "") for p in parts if not p.get("thought"))
+    return jsonify({"reply": text_out.strip() or "Порожня відповідь"})
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+    

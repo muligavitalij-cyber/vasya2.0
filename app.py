@@ -7,7 +7,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 
 API_KEY = os.environ.get("GEMINI_API_KEY")
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
-ENABLE_SEARCH = os.environ.get("ENABLE_SEARCH", "1") 
+ENABLE_SEARCH = os.environ.get("ENABLE_SEARCH", "1")
 
 # ---- Сторінка сайту ----
 PAGE = r'''<!doctype html>
@@ -280,6 +280,7 @@ def err(msg, code):
 
 
 @app.route("/")
+@app.route("/api/index")
 def index():
     return Response(PAGE, mimetype="text/html")
 

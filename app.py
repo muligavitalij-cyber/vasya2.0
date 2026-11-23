@@ -1,10 +1,53 @@
 import os
+import time
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 from prompt_builder import build_system_prompt
 from web_search import needs_web_search, web_search
 
 app = Flask(__name__)
+
+# Базовий денний ліміт і надбавка за кожен додатковий активний ключ
+BASE_DAILY_LIMIT = 250
+BONUS_PER_EXTRA_KEY = 0
+
+REQUEST_COSTS = {
+    "small": 1,
+    "medium": 3,
+    "large": 10,
+}
+
+LARGE_KEYWORDS = [
+    "великий код",
+    "напиши код",
+    "напиши програму",
+    "напиши сайт",
+    "напиши скрипт",
+    "твір",
+    "есе",
+    "велике есе",
+    "доповідь",
+    "реферат",
+    "з нуля",
+    "архітектур",
+    "детальний розбір",
+    "повний код",
+    "багато коду",
+]
+
+MEDIUM_KEYWORDS = [
+    "поясни",
+    "інформац",
+    "порівняй",
+    "приклади",
+    "як працює",
+    "зроби план",
+    "короткий код",
+    "фрагмент коду",
+    "виправ помилку",
+    "чому",
+    "навіщо",
+]
 
 MODE_MODELS = {
     "fast": [
@@ -37,6 +80,58 @@ VISION_MODELS = [
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 ]
 
+# Простий серверний кеш лімітів (скидається при рестарті інстансу на Vercel до підключення постійної БД)
+USAGE_STORE: dict[str, dict] = {}
+
+
+def get_api_keys() -> list[str]:
+    return [
+        k.strip()
+        for k in [
+            os.getenv("OPENROUTER_API_KEY", ""),
+            os.getenv("OPENROUTER_API_KEY_2", ""),
+            os.getenv("OPENROUTER_API_KEY_3", ""),
+            os.getenv("OPENROUTER_API_KEY_4", ""),
+            os.getenv("OPENROUTER_API_KEY_5", ""),
+            os.getenv("OPENROUTER_API_KEY_6", ""),
+        ]
+        if k and k.strip()
+    ]
+
+
+def get_effective_daily_limit(keys_count: int) -> int:
+    extra_keys = max(0, keys_count - 1)
+    return BASE_DAILY_LIMIT + (extra_keys * BONUS_PER_EXTRA_KEY)
+
+
+def classify_request(text: str, has_image: bool = False) -> tuple[str, int]:
+    clean = (text or "").strip()
+    lower = clean.lower()
+    length = len(clean)
+
+    if any(kw in lower for kw in LARGE_KEYWORDS) or length >= 450:
+        return "large", REQUEST_COSTS["large"]
+
+    if has_image or any(kw in lower for kw in MEDIUM_KEYWORDS) or length >= 90:
+        return "medium", REQUEST_COSTS["medium"]
+
+    return "small", REQUEST_COSTS["small"]
+
+
+def get_day_key() -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+
+def get_client_bucket(client_id: str, daily_limit: int) -> dict:
+    safe_id = (client_id or "anon").strip()[:64] or "anon"
+    today = get_day_key()
+    entry = USAGE_STORE.get(safe_id)
+    if not entry or entry.get("day") != today:
+        entry = {"day": today, "used": 0, "limit": daily_limit}
+        USAGE_STORE[safe_id] = entry
+    entry["limit"] = daily_limit
+    return entry
+
 
 @app.get("/")
 def home():
@@ -46,6 +141,21 @@ def home():
 @app.get("/icon.png")
 def favicon():
     return send_from_directory(".", "icon.png")
+
+
+@app.get("/api/limit-status")
+def limit_status():
+    client_id = (request.args.get("client_id") or "anon").strip()
+    keys = get_api_keys()
+    daily_limit = get_effective_daily_limit(len(keys))
+    bucket = get_client_bucket(client_id, daily_limit)
+    remaining = max(0, bucket["limit"] - bucket["used"])
+    return jsonify({
+        "used": bucket["used"],
+        "limit": bucket["limit"],
+        "remaining": remaining,
+        "costs": REQUEST_COSTS,
+    })
 
 
 def get_candidate_models(mode: str, has_image: bool = False) -> list[str]:
@@ -129,9 +239,31 @@ def chat_endpoint():
     model_mode = (data.get("model_mode") or "auto").strip().lower()
     image_data = data.get("image")
     history = data.get("history") or []
+    client_id = (data.get("client_id") or "anon").strip()
 
     if not user_text and not image_data:
         return jsonify({"error": "Порожній запит."}), 400
+
+    api_keys = get_api_keys()
+    daily_limit = get_effective_daily_limit(len(api_keys))
+    bucket = get_client_bucket(client_id, daily_limit)
+
+    size_tier, cost = classify_request(user_text, has_image=bool(image_data))
+    remaining = max(0, bucket["limit"] - bucket["used"])
+
+    if cost > remaining:
+        return jsonify({
+            "reply": (
+                f"Не вистачає ліміту на сьогодні: цей запит оцінено як {size_tier} ({cost} од.), "
+                f"а залишилось {remaining} з {bucket['limit']} од."
+            ),
+            "limit_exceeded": True,
+            "size_tier": size_tier,
+            "cost": cost,
+            "used": bucket["used"],
+            "limit": bucket["limit"],
+            "remaining": remaining,
+        }), 429
 
     search_ctx = web_search(user_text) if (user_text and needs_web_search(user_text)) else ""
     system_prompt = build_system_prompt(search_context=search_ctx, mode=model_mode)
@@ -151,24 +283,28 @@ def chat_endpoint():
         "content": build_user_content(user_text, image_data),
     })
 
-    api_keys = [
-        k.strip()
-        for k in [
-            os.getenv("OPENROUTER_API_KEY", ""),
-            os.getenv("OPENROUTER_API_KEY_2", ""),
-            os.getenv("OPENROUTER_API_KEY_3", ""),
-            os.getenv("OPENROUTER_API_KEY_4", ""),
-            os.getenv("OPENROUTER_API_KEY_5", ""),
-            os.getenv("OPENROUTER_API_KEY_6", ""),
-        ]
-        if k and k.strip()
-    ]
-
     models_to_try = get_candidate_models(model_mode, has_image=bool(image_data))
     reply = call_openrouter(messages=messages, models=models_to_try, api_keys=api_keys)
 
     if not reply:
-        return jsonify({"reply": "На жаль, зараз жодна модель не змогла відповісти. Спробуй ще раз."}), 502
+        return jsonify({
+            "reply": "На жаль, зараз жодна модель не змогла відповісти. Спробуй ще раз.",
+            "size_tier": size_tier,
+            "cost": cost,
+            "used": bucket["used"],
+            "limit": bucket["limit"],
+            "remaining": remaining,
+        }), 502
 
-    return jsonify({"reply": reply})
-    
+    bucket["used"] += cost
+    new_remaining = max(0, bucket["limit"] - bucket["used"])
+
+    return jsonify({
+        "reply": reply,
+        "size_tier": size_tier,
+        "cost": cost,
+        "used": bucket["used"],
+        "limit": bucket["limit"],
+        "remaining": new_remaining,
+    })
+        

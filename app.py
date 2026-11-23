@@ -1,6 +1,6 @@
 import os
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from prompt_builder import build_system_prompt
 from web_search import needs_web_search, web_search
 
@@ -36,6 +36,16 @@ VISION_MODELS = [
     "google/gemma-4-31b-it:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 ]
+
+
+@app.get("/")
+def home():
+    return send_from_directory(".", "index.html")
+
+
+@app.get("/icon.png")
+def favicon():
+    return send_from_directory(".", "icon.png")
 
 
 def get_candidate_models(mode: str, has_image: bool = False) -> list[str]:

@@ -265,8 +265,13 @@ def chat_endpoint():
             "remaining": remaining,
         }), 429
 
+    has_image = bool(image_data)
     search_ctx = web_search(user_text) if (user_text and needs_web_search(user_text)) else ""
-    system_prompt = build_system_prompt(search_context=search_ctx, mode=model_mode)
+    system_prompt = build_system_prompt(
+        search_context=search_ctx,
+        mode=model_mode,
+        has_image=has_image,
+    )
 
     messages = [{"role": "system", "content": system_prompt}]
 
@@ -283,7 +288,7 @@ def chat_endpoint():
         "content": build_user_content(user_text, image_data),
     })
 
-    models_to_try = get_candidate_models(model_mode, has_image=bool(image_data))
+    models_to_try = get_candidate_models(model_mode, has_image=has_image)
     reply = call_openrouter(messages=messages, models=models_to_try, api_keys=api_keys)
 
     if not reply:
@@ -307,4 +312,4 @@ def chat_endpoint():
         "limit": bucket["limit"],
         "remaining": new_remaining,
     })
-        
+    

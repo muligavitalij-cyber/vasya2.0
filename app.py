@@ -23,6 +23,8 @@ def _load_openrouter_keys() -> List[str]:
         "OPENROUTER_API_KEY_3",
         "OPENROUTER_API_KEY_4",
         "OPENROUTER_API_KEY_5",
+        "OPENROUTER_API_KEY_6",
+        "OPENROUTER_API_KEY_7",
         "OPENROUTER_API_KEYS",
     ):
         raw_val = (os.environ.get(env_name) or "").strip()
@@ -34,16 +36,19 @@ def _load_openrouter_keys() -> List[str]:
                 keys.append(clean)
     return keys
 
+
 OPENROUTER_KEYS = _load_openrouter_keys()
 OPENROUTER_DEFAULT_MODEL = (os.environ.get("OPENROUTER_MODEL") or "").strip().lower()
 OPENROUTER_FAST_MODEL = "google/gemma-4-26b-a4b-it:free"
 OPENROUTER_SMART_MODEL = "google/gemma-4-31b-it:free"
 OPENROUTER_BACKUP_MODELS: List[str] = [
     "nvidia/nemotron-3.5-lightning:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "recursive/flint-v1.0:free",
     "google/gemma-4-31b-it:free",
     "google/gemma-4-26b-a4b-it:free",
 ]
-
 TOPIC_KEYWORDS: Dict[str, List[str]] = {
     "geography": [
         "географія", "материк", "океан", "море", "річка", "озеро", "гора",
@@ -207,8 +212,6 @@ def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
         return mime, base64.b64encode(raw).decode("ascii")
     except Exception:
         return None
-
-
 PAGE = r'''<!doctype html>
 <html lang="uk">
 <head>
@@ -479,6 +482,7 @@ PAGE = r'''<!doctype html>
         reader.readAsText(file);
       }
     }
+
     function startThinking() {
       stopThinking();
       isThinking = true;
@@ -745,8 +749,6 @@ PAGE = r'''<!doctype html>
 </body>
 </html>
 '''
-
-
 def _build_openrouter_messages(raw_msgs, system_text: str, context_block: str = "") -> List[dict]:
     out: List[dict] = []
 
@@ -1000,4 +1002,4 @@ def chat():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-    
+        

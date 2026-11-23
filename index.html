@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Вася AI 2.1.50</title>
+  <title>Вася AI 2.1.65</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -47,6 +47,25 @@
       border-radius: 10px;
       padding: 8px 10px;
       font-size: 14px;
+    }
+
+    .limit-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 12px;
+      background: #12151c;
+      border-bottom: 1px solid #222733;
+      font-size: 12px;
+      color: #cbd5e1;
+    }
+    .tier-badge {
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #222733;
+      border: 1px solid #343b4d;
+      font-weight: 600;
     }
 
     .backdrop {
@@ -207,6 +226,11 @@
     <button id="newChatBtn" class="pill-btn" type="button">+ Новий</button>
   </header>
 
+  <div class="limit-bar">
+    <span id="limitRemainingText">Ліміт: 250 / 250</span>
+    <span id="requestEstimateBadge" class="tier-badge">Малий • 1 од.</span>
+  </div>
+
   <div id="backdrop" class="backdrop"></div>
 
   <aside id="sidebar" class="sidebar" aria-label="Історія чатів">
@@ -227,7 +251,12 @@
   </form>
 
   <script>
-    const STORAGE_KEY = "vasya_ai_2_1_50_chats";
+    const STORAGE_KEY = "vasya_ai_2_1_65_chats";
+    const DAILY_LIMIT = 250;
+    const COSTS = { small: 1, medium: 3, large: 10 };
+
+    const LARGE_RE = /(великий код|напиши код|напиши програму|напиши сайт|напиши скрипт|твір|есе|велике есе|доповідь|реферат|з нуля|архітектур|детальний розбір|повний код|багато коду)/i;
+    const MEDIUM_RE = /(поясни|інформац|порівняй|приклади|як працює|зроби план|короткий код|фрагмент коду|виправ помилку|чому|навіщо)/i;
 
     const sidebar = document.getElementById("sidebar");
     const backdrop = document.getElementById("backdrop");
@@ -240,15 +269,27 @@
     const composerForm = document.getElementById("composerForm");
     const messageInput = document.getElementById("messageInput");
     const imageInput = document.getElementById("imageInput");
+    const limitRemainingText = document.getElementById("limitRemainingText");
+    const requestEstimateBadge = document.getElementById("requestEstimateBadge");
 
     let state = loadState();
     let pendingImageBase64 = null;
 
+    function todayUtc() {
+      return new Date().toISOString().slice(0, 10);
+    }
+
     function defaultState() {
       const firstId = "chat_" + Date.now();
       return {
+        clientId: "u_" + Math.random().toString(36).slice(2, 10) + "_" + Date.now().toString(36),
         activeChatId: firstId,
         mode: "auto",
+        usage: {
+          day: todayUtc(),
+          used: 0,
+          limit: DAILY_LIMIT
+        },
         chats: {
           [firstId]: {
             id: firstId,
@@ -256,7 +297,7 @@
             messages: [
               {
                 role: "assistant",
-                text: "Привіт! Я Вася AI 2.1.50. Знаю актуальну дату, вмію шукати в мережі, читаю фото й готовий до роботи."
+                text: "Привіт! Я Вася AI 2.1.65. Додав розумні ліміти на 250 одиниць і поділ запитів на малі, середні та великі."
               }
             ]
           }
@@ -272,6 +313,12 @@
         if (!parsed.chats || !parsed.activeChatId || !parsed.chats[parsed.activeChatId]) {
           return defaultState();
         }
+        if (!parsed.clientId) {
+          parsed.clientId = "u_" + Math.random().toString(36).slice(2, 10);
+        }
+        if (!parsed.usage || parsed.usage.day !== todayUtc()) {
+          parsed.usage = { day: todayUtc(), used: 0, limit: DAILY_LIMIT };
+        }
         return parsed;
       } catch {
         return defaultState();
@@ -282,6 +329,30 @@
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       } catch {}
+    }
+
+    function classifyLocal(text, hasImage) {
+      const clean = (text || "").trim();
+      if (LARGE_RE.test(clean) || clean.length >= 450) {
+        return { tier: "large", label: "Великий", cost: COSTS.large };
+      }
+      if (hasImage || MEDIUM_RE.test(clean) || clean.length >= 90) {
+        return { tier: "medium", label: "Середній", cost: COSTS.medium };
+      }
+      return { tier: "small", label: "Малий", cost: COSTS.small };
+    }
+
+    function updateLimitUi() {
+      if (!state.usage || state.usage.day !== todayUtc()) {
+        state.usage = { day: todayUtc(), used: 0, limit: DAILY_LIMIT };
+      }
+      const limit = state.usage.limit || DAILY_LIMIT;
+      const used = state.usage.used || 0;
+      const remaining = Math.max(0, limit - used);
+      limitRemainingText.textContent = `Ліміт: ${remaining} / ${limit} од.`;
+
+      const est = classifyLocal(messageInput.value, Boolean(pendingImageBase64));
+      requestEstimateBadge.textContent = `${est.label} • ${est.cost} од.`;
     }
 
     function setSidebarOpen(isOpen) {
@@ -322,6 +393,8 @@
       saveState();
     });
 
+    messageInput.addEventListener("input", updateLimitUi);
+
     newChatBtn.addEventListener("click", () => {
       const id = "chat_" + Date.now();
       state.chats[id] = {
@@ -339,11 +412,13 @@
       const file = imageInput.files && imageInput.files[0];
       if (!file) {
         pendingImageBase64 = null;
+        updateLimitUi();
         return;
       }
       const reader = new FileReader();
       reader.onload = () => {
         pendingImageBase64 = reader.result;
+        updateLimitUi();
       };
       reader.readAsDataURL(file);
     });
@@ -418,6 +493,7 @@
     function renderAll() {
       renderChatList();
       renderMessages();
+      updateLimitUi();
     }
 
     composerForm.addEventListener("submit", async (e) => {
@@ -425,6 +501,14 @@
       const text = messageInput.value.trim();
       const imageToSend = pendingImageBase64;
       if (!text && !imageToSend) return;
+
+      const est = classifyLocal(text, Boolean(imageToSend));
+      const limit = (state.usage && state.usage.limit) || DAILY_LIMIT;
+      const used = (state.usage && state.usage.used) || 0;
+      if (est.cost > Math.max(0, limit - used)) {
+        alert(`Не вистачає ліміту: потрібно ${est.cost} од., залишилось ${Math.max(0, limit - used)} од.`);
+        return;
+      }
 
       const activeChat = state.chats[state.activeChatId];
       if (activeChat.title === "Новий чат" && text) {
@@ -445,6 +529,7 @@
       messageInput.value = "";
       imageInput.value = "";
       pendingImageBase64 = null;
+      updateLimitUi();
 
       try {
         const res = await fetch("/api/chat", {
@@ -454,6 +539,7 @@
             message: text,
             model_mode: modelSelect.value,
             image: imageToSend,
+            client_id: state.clientId,
             history: activeChat.messages.slice(-8, -1).map((m) => ({
               role: m.role,
               content: m.text || ""
@@ -462,6 +548,14 @@
         });
         const data = await res.json();
         thinkingMsg.text = data.reply || data.response || data.error || "Порожня відповідь від сервера.";
+
+        if (typeof data.used === "number" && typeof data.limit === "number") {
+          state.usage = {
+            day: todayUtc(),
+            used: data.used,
+            limit: data.limit
+          };
+        }
       } catch {
         thinkingMsg.text = "Не вдалося з'єднатися з сервером.";
       }
@@ -474,4 +568,4 @@
   </script>
 </body>
   </html>
-      
+  

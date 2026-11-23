@@ -1,1005 +1,727 @@
-import base64
-import json
-import os
-import re
-import time
-import urllib.parse
-import urllib.request
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+
+def get_kyiv_date_info() -> dict:
+    now = datetime.now(ZoneInfo("Europe/Kyiv"))
+    days_ua = [
+        "понеділок", "вівторок", "середа", "четвер",
+        "п'ятниця", "субота", "неділя"
+    ]
+    months_gen_ua = [
+        "", "січня", "лютого", "березня", "квітня", "травня", "червня",
+        "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"
+    ]
+    months_nom_ua = [
+        "", "січень", "лютий", "березень", "квітень", "травень", "червень",
+        "липень", "серпень", "вересень", "жовтень", "листопад", "грудень"
+    ]
+
+    return {
+        "iso_date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M"),
+        "day": now.day,
+        "weekday": days_ua[now.weekday()],
+        "month_gen": months_gen_ua[now.month],
+        "month_nom": months_nom_ua[now.month],
+        "year": now.year,
+        "week_number": now.isocalendar().week,
+    }
+
+def build_system_prompt(search_context: str = "", mode: str = "auto") -> str:
+    d = get_kyiv_date_info()
+
+    date_block = (
+        f"Актуальна дата і час (Київ): {d['day']} {d['month_gen']} {d['year']} року, "
+        f"{d['weekday']}, місяць — {d['month_nom']}, тиждень року — №{d['week_number']}, "
+        f"час — {d['time']}."
+    )
+
+    rules_block = (
+        "Ти — Вася AI, корисний і чесний мобільний асистент. "
+        "Пиши грамотною, природною українською мовою без орфографічних, "
+        "пунктуаційних чи граматичних помилок і без вигаданих слів. "
+        "Описуй лише те, що реально бачиш на зображенні або в наданих результатах пошуку. "
+        "Якщо не знаєш факту, не вистачає даних або фото розмите чи не передалося — "
+        "прямо і чесно скажи про це, не вигадуй чисел, дат, імен чи посилань. "
+        "Якщо нижче подані результати веб-пошуку, спирайся на них як на основне джерело."
+    )
+
+    mode_hint = {
+        "fast": "Відповідай коротко, чітко і по суті.",
+        "smart": "Пояснюй логічно, структуровано й уважно до деталей.",
+        "pro": "Розбирай задачу максимально глибоко, перевіряй кожен висновок і не поспішай.",
+    }.get(mode, "Підлаштовуй глибину відповіді під складність запиту.")
+
+    parts = [rules_block, mode_hint, date_block]
+    if search_context:
+        parts.append(f"Результати веб-пошуку:\n{search_context}")
+
+    return "\n\n".join(parts)
+    import os
 import requests
-from flask import Flask, Response, jsonify, request, send_from_directory
+
+
+def needs_web_search(query: str) -> bool:
+    if not query:
+        return False
+    q = query.lower().strip()
+    triggers = [
+        "новини", "сьогодні", "вчора", "завтра", "зараз", "актуальн",
+        "ціна", "курс", "погода", "матч", "рахунок", "результат",
+        "хто виграв", "коли вийде", "що нового", "знайди", "пошукай",
+        "перевір", "останні", "2026"
+    ]
+    return any(word in q for word in triggers)
+
+
+def web_search(query: str, max_results: int = 4) -> str:
+    api_key = os.getenv("TAVILY_API_KEY", "").strip()
+    if not api_key or not query.strip():
+        return ""
+
+    try:
+        response = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": api_key,
+                "query": query.strip(),
+                "max_results": max_results,
+                "include_answer": False,
+                "search_depth": "basic",
+            },
+            timeout=3,
+        )
+        response.raise_for_status()
+        data = response.json()
+        results = data.get("results", [])
+
+        formatted = []
+        for item in results[:max_results]:
+            title = (item.get("title") or "Без назви").strip()
+            content = (item.get("content") or "").strip().replace("\n", " ")
+            url = (item.get("url") or "").strip()
+            if len(content) > 280:
+                content = content[:277] + "..."
+            formatted.append(f"- {title}: {content} (Джерело: {url})")
+
+        return "\n".join(formatted)
+    except Exception:
+        return ""
+    import os
+import requests
+from flask import Flask, jsonify, request
+from prompt_builder import build_system_prompt
+from web_search import needs_web_search, web_search
 
 app = Flask(__name__)
-BASE = os.path.dirname(os.path.abspath(__file__))
 
-DEBUG = os.environ.get("DEBUG", "0") == "1"
-
-
-def _load_openrouter_keys() -> List[str]:
-    keys: List[str] = []
-    for env_name in (
-        "OPENROUTER_API_KEY",
-        "OPENROUTER_API_KEY_2",
-        "OPENROUTER_API_KEY_3",
-        "OPENROUTER_API_KEY_4",
-        "OPENROUTER_API_KEY_5",
-        "OPENROUTER_API_KEY_6",
-        "OPENROUTER_API_KEY_7",
-        "OPENROUTER_API_KEYS",
-    ):
-        raw_val = (os.environ.get(env_name) or "").strip()
-        if not raw_val:
-            continue
-        for part in re.split(r"[\s,;]+", raw_val):
-            clean = part.strip().strip('"').strip("'")
-            if clean and clean not in keys:
-                keys.append(clean)
-    return keys
-
-
-OPENROUTER_KEYS = _load_openrouter_keys()
-OPENROUTER_DEFAULT_MODEL = (os.environ.get("OPENROUTER_MODEL") or "").strip().lower()
-OPENROUTER_FAST_MODEL = "google/gemma-4-26b-a4b-it:free"
-OPENROUTER_SMART_MODEL = "google/gemma-4-31b-it:free"
-OPENROUTER_BACKUP_MODELS: List[str] = [
-    "nvidia/nemotron-3.5-lightning:free",
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    "recursive/flint-v1.0:free",
-    "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
-]
-TOPIC_KEYWORDS: Dict[str, List[str]] = {
-    "geography": [
-        "географія", "материк", "океан", "море", "річка", "озеро", "гора",
-        "клімат", "координати", "столиця", "країна", "регіон", "зона",
-        "берегова лінія", "протока", "затока", "острів", "місто", "село"
-    ],
-    "math_calc": [
-        "обчисли", "розв'яжи", "рівняння", "інтеграл", "похідна", "дріб",
-        "відсоток", "формула", "скільки буде", "порахуй"
-    ],
-    "space_science": [
-        "космос", "планета", "зірка", "галактика", "nasa", "астрономія",
-        "супутник", "орбіта", "сонце", "місяць"
-    ],
-    "weather": ["погода", "температура", "дощ", "сніг", "вітер", "прогноз погоди"],
-    "currency": ["курс", "валюта", "долар", "євро", "гривня", "usd", "eur", "uah"],
-    "news": ["новини", "актуальні новини", "що сталося", "події сьогодні"],
-    "youtube": ["youtube", "ютуб", "відео", "канал", "ролик"],
-    "translate": ["переклади", "переклад", "англійською", "українською", "мовою"],
-    "calendar": ["календар", "дата", "день тижня", "свято", "розклад", "дедлайн"],
+# Впиши сюди точні ID моделей OpenRouter з твого списку
+MODE_MODELS = {
+    "fast": [],
+    "smart": [],
+    "pro": [],
 }
 
+ALL_FALLBACK_MODELS = []
 
-def detect_topics(query: str) -> List[str]:
-    q = (query or "").lower()
-    found = [t for t, words in TOPIC_KEYWORDS.items() if any(w in q for w in words)]
-    return found or ["general"]
-
-
-def build_source_plan(topics: List[str]) -> List[str]:
-    plan: List[str] = []
-    if "geography" in topics:
-        plan.extend(["openstreetmap", "geonames", "wikipedia", "wikidata", "brave"])
-    if "space_science" in topics:
-        plan.extend(["nasa", "wikipedia", "wikidata", "brave"])
-    if "math_calc" in topics:
-        plan.extend(["wolfram", "wikipedia", "brave"])
-    for extra in ("weather", "currency", "news", "youtube", "translate", "calendar"):
-        if extra in topics:
-            plan.append(extra)
-            plan.append("brave")
-    if "general" in topics:
-        plan.extend(["wikipedia", "wikidata", "brave", "wolfram"])
-
-    out: List[str] = []
-    for item in plan:
-        if item not in out:
-            out.append(item)
-    return out
+# Сюди впиши моделі, які точно підтримують фото
+VISION_MODELS = []
 
 
-def _get_json(url: str, headers: Optional[Dict[str, str]] = None, timeout: float = 4.0):
-    try:
-        req_headers = {"User-Agent": "VasyaAI/1.0"}
-        if headers:
-            req_headers.update(headers)
-        req = urllib.request.Request(url, headers=req_headers)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8", errors="replace"))
-    except Exception:
-        return None
+def get_candidate_models(mode: str, has_image: bool = False) -> list[str]:
+    chosen = MODE_MODELS.get(mode, [])
+    merged = list(chosen)
+    for m in ALL_FALLBACK_MODELS:
+        if m not in merged:
+            merged.append(m)
+
+    if has_image:
+        vision_first = list(VISION_MODELS)
+        for m in merged:
+            if m not in vision_first:
+                vision_first.append(m)
+        return vision_first
+
+    return merged
 
 
-def collect_topic_context(query: str, max_items: int = 3) -> str:
-    plan = build_source_plan(detect_topics(query))
-    enc = urllib.parse.quote((query or "").strip())
-    notes: List[str] = []
+def build_user_content(text: str, image_data: str | None):
+    if image_data:
+        return [
+            {"type": "text", "text": text if text else "Що зображено на цьому фото?"},
+            {"type": "image_url", "image_url": {"url": image_data}},
+        ]
+    return text
 
-    for src in plan:
-        if len(notes) >= max_items:
-            break
-        if src == "openstreetmap":
-            data = _get_json(
-                f"https://nominatim.openstreetmap.org/search?q={enc}&format=json&limit=1&accept-language=uk",
-                timeout=4.0,
-            )
-            if isinstance(data, list) and data:
-                p = data[0]
-                notes.append(f"[OpenStreetMap] {p.get('display_name')} (lat={p.get('lat')}, lon={p.get('lon')})")
-        elif src == "geonames":
-            user = (os.environ.get("GEONAMES_USERNAME") or "").strip()
-            if user:
-                data = _get_json(
-                    f"http://api.geonames.org/searchJSON?q={enc}&maxRows=1&lang=uk&username={user}",
-                    timeout=4.0,
+
+def call_openrouter(messages: list[dict], models: list[str], api_keys: list[str]) -> str | None:
+    headers_base = {
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://vasya2-0.vercel.app",
+        "X-Title": "Vasya AI",
+    }
+
+    for model_name in models:
+        for api_key in api_keys:
+            if not api_key:
+                continue
+            try:
+                resp = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        **headers_base,
+                        "Authorization": f"Bearer {api_key}",
+                    },
+                    json={
+                        "model": model_name,
+                        "messages": messages,
+                    },
+                    timeout=12,
                 )
-                if isinstance(data, dict) and data.get("geonames"):
-                    g = data["geonames"][0]
-                    notes.append(f"[GeoNames] {g.get('name')} ({g.get('countryName')}): lat={g.get('lat')}, lon={g.get('lng')}")
-        elif src == "wikipedia":
-            for lang in ("uk", "en"):
-                data = _get_json(f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{enc}", timeout=3.5)
-                if isinstance(data, dict) and data.get("extract"):
-                    notes.append(f"[Wikipedia/{lang}] {data.get('title')}: {data['extract']}")
-                    break
-        elif src == "wikidata":
-            data = _get_json(
-                f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={enc}&language=uk&format=json&limit=1",
-                timeout=3.5,
-            )
-            if isinstance(data, dict) and data.get("search"):
-                s = data["search"][0]
-                notes.append(f"[Wikidata] {s.get('label')} ({s.get('id')}): {s.get('description', '')}")
-        elif src == "brave":
-            key = (os.environ.get("BRAVE_API_KEY") or "").strip()
-            if key:
-                data = _get_json(
-                    f"https://api.search.brave.com/res/v1/web/search?q={enc}&count=3",
-                    headers={"Accept": "application/json", "X-Subscription-Token": key},
-                    timeout=4.5,
-                )
-                if isinstance(data, dict):
-                    items = (data.get("web") or {}).get("results") or []
-                    if items:
-                        lines = [f"- {it.get('title')}: {it.get('description')}" for it in items[:3]]
-                        notes.append("[Brave Search]\n" + "\n".join(lines))
-        elif src == "wolfram":
-            app_id = (os.environ.get("WOLFRAM_APP_ID") or "").strip()
-            if app_id:
-                try:
-                    req = urllib.request.Request(
-                        f"https://api.wolframalpha.com/v1/result?i={enc}&appid={app_id}",
-                        headers={"User-Agent": "VasyaAI/1.0"},
-                    )
-                    with urllib.request.urlopen(req, timeout=4.5) as resp:
-                        txt = resp.read().decode("utf-8", errors="replace").strip()
-                        if txt and "did not understand" not in txt.lower():
-                            notes.append(f"[Wolfram Alpha] {txt}")
-                except Exception:
-                    pass
-        elif src == "nasa":
-            nkey = (os.environ.get("NASA_API_KEY") or "DEMO_KEY").strip()
-            data = _get_json(f"https://api.nasa.gov/planetary/apod?api_key={nkey}", timeout=4.5)
-            if isinstance(data, dict) and data.get("title"):
-                notes.append(f"[NASA] {data.get('title')}: {str(data.get('explanation') or '')[:300]}")
-        elif src in {"weather", "currency", "news", "youtube", "translate", "calendar"}:
-            env_map = {
-                "weather": "WEATHER_API_KEY",
-                "currency": "CURRENCY_API_KEY",
-                "news": "NEWS_API_KEY",
-                "youtube": "YOUTUBE_API_KEY",
-                "translate": "TRANSLATE_API_KEY",
-                "calendar": "CALENDAR_API_KEY",
-            }
-            if (os.environ.get(env_map[src]) or "").strip():
-                notes.append(f"[{src.upper()}] Ключ підключено; запит: {query}")
-
-    return "\n\n".join(notes)
+                if resp.status_code != 200:
+                    continue
+                payload = resp.json()
+                choices = payload.get("choices") or []
+                if not choices:
+                    continue
+                content = (choices[0].get("message") or {}).get("content")
+                if isinstance(content, list):
+                    text_parts = [
+                        part.get("text", "")
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    ]
+                    content = "".join(text_parts).strip()
+                elif isinstance(content, str):
+                    content = content.strip()
+                if content:
+                    return content
+            except Exception:
+                continue
+    return None
 
 
-def _parse_data_url(data_url: str) -> Optional[Tuple[str, str]]:
-    m = re.match(r"^data:([^;]+);base64,(.+)$", data_url or "", re.DOTALL)
-    if not m:
-        return None
-    mime = m.group(1).strip()
-    b64 = m.group(2).strip()
-    try:
-        raw = base64.b64decode(b64, validate=False)
-        if len(raw) > 4_000_000:
-            return None
-        return mime, base64.b64encode(raw).decode("ascii")
-    except Exception:
-        return None
-PAGE = r'''<!doctype html>
+@app.post("/api/chat")
+def chat_endpoint():
+    data = request.get_json(silent=True) or {}
+
+    user_text = (data.get("message") or "").strip()
+    model_mode = (data.get("model_mode") or "auto").strip().lower()
+    image_data = data.get("image")
+    history = data.get("history") or []
+
+    if not user_text and not image_data:
+        return jsonify({"error": "Порожній запит."}), 400
+
+    search_ctx = web_search(user_text) if (user_text and needs_web_search(user_text)) else ""
+    system_prompt = build_system_prompt(search_context=search_ctx, mode=model_mode)
+
+    messages = [{"role": "system", "content": system_prompt}]
+
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+            messages.append({"role": role, "content": content.strip()})
+
+    messages.append({
+        "role": "user",
+        "content": build_user_content(user_text, image_data),
+    })
+
+    api_keys = [
+        k.strip()
+        for k in [
+            os.getenv("OPENROUTER_API_KEY", ""),
+            os.getenv("OPENROUTER_API_KEY_2", ""),
+            os.getenv("OPENROUTER_API_KEY_3", ""),
+        ]
+        if k and k.strip()
+    ]
+
+    models_to_try = get_candidate_models(model_mode, has_image=bool(image_data))
+    reply = call_openrouter(messages=messages, models=models_to_try, api_keys=api_keys)
+
+    if not reply:
+        return jsonify({"reply": "На жаль, зараз жодна модель не змогла відповісти. Спробуй ще раз."}), 502
+
+    return jsonify({"reply": reply})
+<!DOCTYPE html>
 <html lang="uk">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Вася АІ</title>
-  <link rel="icon" type="image/png" href="/icon.png">
-  <link rel="apple-touch-icon" href="/icon.png">
-
-  <script>
-    window.MathJax = {
-      tex: {
-        inlineMath: [['$', '$'], ['\\(', '\\)']],
-        displayMath: [['$$', '$$'], ['\\[', '\\]']],
-        processEscapes: true
-      },
-      options: {
-        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
-      }
-    };
-  </script>
-  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Вася AI 2.1.50</title>
   <style>
-    :root {
-      --bg: #121212;
-      --grid: rgba(255, 255, 255, 0.05);
-      --panel: #191c22;
-      --card: #22262f;
-      --user: #1f3a5f;
-      --border: rgba(255, 255, 255, 0.12);
-      --text: #f0f3f8;
-      --muted: #a4aec0;
-      --accent: #38a169;
-    }
     * { box-sizing: border-box; }
     body {
-      font-family: system-ui, -apple-system, sans-serif;
       margin: 0;
-      background-color: var(--bg);
-      background-image:
-        linear-gradient(to right, var(--grid) 1px, transparent 1px),
-        linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
-      background-size: 22px 22px;
-      color: var(--text);
-      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f1115;
+      color: #f3f4f6;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
     }
+
+    .top-bar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 12px;
+      background: #161920;
+      border-bottom: 1px solid #262b36;
+    }
+    .icon-btn, .pill-btn {
+      background: #222733;
+      color: #f9fafb;
+      border: 1px solid #343b4d;
+      border-radius: 10px;
+      padding: 8px 11px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .model-select {
+      flex: 1;
+      max-width: 190px;
+      background: #222733;
+      color: #f9fafb;
+      border: 1px solid #343b4d;
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 14px;
+    }
+
+    .backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+      z-index: 30;
+    }
+    .backdrop.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
     .sidebar {
       position: fixed;
       top: 0;
       left: 0;
-      width: 265px;
-      height: 100vh;
-      background: var(--panel);
-      border-right: 1px solid var(--border);
-      padding: 12px;
+      bottom: 0;
+      width: 80%;
+      max-width: 320px;
+      background: #171a22;
+      border-right: 1px solid #2a303d;
+      transform: translateX(-100%);
+      transition: transform 0.22s ease;
+      z-index: 40;
       display: flex;
       flex-direction: column;
-      gap: 10px;
-      transform: translateX(-100%);
-      transition: transform 0.2s ease;
-      z-index: 40;
     }
-    .sidebar.open { transform: translateX(0); }
-    .backdrop {
-      display: none;
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.55);
-      z-index: 30;
+    .sidebar.open {
+      transform: translateX(0);
     }
-    .backdrop.show { display: block; }
+    .sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-bottom: 1px solid #262b36;
+    }
     .chat-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
       display: flex;
       flex-direction: column;
       gap: 6px;
-      overflow-y: auto;
-      flex: 1;
     }
-    .chat-btn {
-      width: 100%;
-      text-align: left;
-      background: transparent;
-      color: var(--text);
-      border: 1px solid transparent;
-      padding: 8px 10px;
-      border-radius: 8px;
+    .chat-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #1e232e;
       cursor: pointer;
-      white-space: nowrap;
+      font-size: 14px;
+    }
+    .chat-item.active {
+      background: #2b354b;
+      border: 1px solid #4c6494;
+    }
+    .chat-title {
       overflow: hidden;
       text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
     }
-    .chat-btn.active {
-      background: rgba(56, 161, 105, 0.2);
-      border-color: rgba(56, 161, 105, 0.45);
+    .del-btn {
+      background: transparent;
+      border: none;
+      color: #9ca3af;
+      font-size: 15px;
+      cursor: pointer;
+      padding: 0 4px;
     }
-    .wrap { max-width: 760px; margin: 0 auto; padding: 12px 12px 96px; }
-    .bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
-    select, button, input { font-size: 15px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); }
-    select, input { background: #1c1f26; color: #fff; }
-    button { background: var(--accent); color: #fff; border: none; cursor: pointer; }
-    button.grey { background: #363c47; }
-    button:disabled { opacity: 0.55; cursor: not-allowed; }
-    .quota { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
-    .messages { display: flex; flex-direction: column; gap: 12px; margin-bottom: 14px; }
-    .msg-wrap { display: flex; flex-direction: column; max-width: 92%; }
-    .msg-wrap.user { align-self: flex-end; }
-    .msg-wrap.assistant, .msg-wrap.error { align-self: flex-start; }
-    .msg { padding: 11px 13px; border-radius: 10px; line-height: 1.5; overflow-x: auto; word-break: break-word; }
-    .user .msg { background: var(--user); }
-    .assistant .msg { background: var(--card); border: 1px solid var(--border); }
-    .error-msg { background: #4c1b1b; border: 1px solid #9e3434; color: #ffd9d9; }
-    .retry-btn { margin-top: 8px; padding: 6px 10px; font-size: 13px; background: #7a2626; border-radius: 7px; }
-    .thinking { background: #1c241e !important; color: #9fd8ad; border-color: #2c4733 !important; font-style: italic; }
-    .who { font-size: 12px; opacity: 0.75; margin-bottom: 4px; }
-    .ai-note { font-size: 12px; color: var(--muted); margin-top: 4px; padding-left: 4px; }
-    .attach-preview { font-size: 12px; color: #b7f5c8; margin-bottom: 8px; display: none; }
-    .send-form {
+
+    .messages {
+      flex: 1;
+      padding: 14px 12px 90px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      overflow-y: auto;
+    }
+    .msg {
+      max-width: 88%;
+      padding: 10px 13px;
+      border-radius: 14px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 15px;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: #26416b;
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: #1c2029;
+      border: 1px solid #2b3140;
+    }
+    .msg img {
+      display: block;
+      max-width: 220px;
+      max-height: 220px;
+      border-radius: 10px;
+      margin-bottom: 6px;
+    }
+
+    .composer {
       position: fixed;
       left: 0;
       right: 0;
       bottom: 0;
-      background: rgba(18, 18, 18, 0.94);
-      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
       padding: 10px 12px;
+      background: #161920;
+      border-top: 1px solid #262b36;
+      z-index: 15;
     }
-    .send-inner { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; align-items: center; }
-    .send-inner input[type="text"] { flex: 1; }
-    table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 14px; }
-    th, td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }
+    .composer input[type="text"] {
+      flex: 1;
+      background: #222733;
+      color: #f9fafb;
+      border: 1px solid #343b4d;
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-size: 15px;
+      outline: none;
+    }
+    .send-btn {
+      background: #3b66f5;
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
-  <aside id="sidebar" class="sidebar">
-    <div style="display:flex;gap:8px;align-items:center;">
-      <button type="button" style="flex:1;" onclick="newChat(); toggleMenu(false);">+ Новий чат</button>
-      <button type="button" class="grey" onclick="toggleMenu(false)">✕</button>
+  <header class="top-bar">
+    <button id="openSidebarBtn" class="icon-btn" type="button" aria-label="Відкрити чати">☰</button>
+    <select id="modelSelect" class="model-select" aria-label="Вибір режиму або моделі">
+      <option value="auto">Авто (ланцюжок)</option>
+      <option value="fast">Швидкий</option>
+      <option value="smart">Смарт</option>
+      <option value="pro">Про</option>
+    </select>
+    <button id="newChatBtn" class="pill-btn" type="button">+ Новий</button>
+  </header>
+
+  <div id="backdrop" class="backdrop"></div>
+
+  <aside id="sidebar" class="sidebar" aria-label="Історія чатів">
+    <div class="sidebar-header">
+      <strong>Чати Васі</strong>
+      <button id="closeSidebarBtn" class="icon-btn" type="button" aria-label="Закрити">✕</button>
     </div>
-    <div id="sidebarChats" class="chat-list"></div>
+    <div id="chatList" class="chat-list"></div>
   </aside>
-  <div id="backdrop" class="backdrop" onclick="toggleMenu(false)"></div>
 
-  <div class="wrap">
-    <div class="bar">
-      <button type="button" class="grey" onclick="toggleMenu(true)">☰ Чати</button>
-      <strong>Вася АІ</strong>
-      <button type="button" onclick="newChat()">+ Новий чат</button>
-      <label for="modeSelect" style="margin-left:auto;">Режим:</label>
-      <select id="modeSelect" onchange="changeMode(this.value)">
-        <option value="default">Дефолт</option>
-        <option value="smart">Смарт</option>
-        <option value="pro">Про</option>
-        <option value="pro+">Про+</option>
-      </select>
-    </div>
+  <main id="messages" class="messages"></main>
 
-    <div class="quota" id="quotaBox"></div>
-    <div class="messages" id="messagesBox"></div>
-  </div>
-
-  <form class="send-form" onsubmit="handleSend(event)">
-    <div class="send-inner">
-      <label class="grey" style="padding:8px 11px;border-radius:8px;cursor:pointer;" title="Прикріпити графік, таблицю або файл">
-        +
-        <input type="file" id="fileInput" accept="image/*,.csv,.txt,.md,.json" hidden onchange="handleFileSelect(event)">
-      </label>
-      <input type="text" id="msgInput" placeholder="Напиши завдання, формулу, тему чи прикріпи графік/таблицю..." autocomplete="off">
-      <button type="submit" id="sendBtn">Надіслати</button>
-    </div>
-    <div id="attachPreview" class="attach-preview" style="max-width:760px;margin:6px auto 0;"></div>
+  <form id="composerForm" class="composer">
+    <label class="icon-btn" for="imageInput" title="Додати фото">+</label>
+    <input id="imageInput" type="file" accept="image/*" hidden />
+    <input id="messageInput" type="text" placeholder="Напиши Васі..." autocomplete="off" />
+    <button id="sendBtn" class="send-btn" type="submit">Надіслати</button>
   </form>
 
   <script>
-    const STORAGE_KEY = "vasya_browser_state_v3";
-    const MODES = {
-      "default": { sfx: "дефолт", limit: null },
-      "smart": { sfx: "смарт", limit: 40 },
-      "pro": { sfx: "про", limit: 25 },
-      "pro+": { sfx: "про+", limit: 20 }
-    };
+    const STORAGE_KEY = "vasya_ai_2_1_50_chats";
 
-    const BASE_HW_RULES =
-      " Допомагай зі шкільними завданнями (географія, історія, мова, література, математика, фізика, хімія, біологія та ін.). " +
-      "Записуй дроби та формули через LaTeX: вбудовані як $\\\\frac{a}{b}$ та окремі як $$\\\\frac{a}{b}$$, не залишай незакритих знаків $. " +
-      "Якщо передано графік — назви тип графіка, підписи осей та одиниці вимірювання, опиши тренд і ключові точки; якщо якесь значення дрібне або нечітке — чесно скажи про це, не вигадуй чисел. " +
-      "Якщо передано таблицю — розбери стовпці й рядки, порівняй показники та знайди закономірності. " +
-      "Коли питають про берегову лінію, материк, країну чи регіон — давай повний, структурований перелік (океани, моря, затоки, протоки, крайні точки та миси, острови/півострови), нічого не пропускаючи. " +
-      "Коли просять есе чи твір — пиши живою, грамотною українською мовою, з вступом, аргументами, прикладами й висновком, без сухої канцелярщини. " +
-      "Коли розбираєш задачі — пояснюй крок за кроком.";
+    const sidebar = document.getElementById("sidebar");
+    const backdrop = document.getElementById("backdrop");
+    const openSidebarBtn = document.getElementById("openSidebarBtn");
+    const closeSidebarBtn = document.getElementById("closeSidebarBtn");
+    const newChatBtn = document.getElementById("newChatBtn");
+    const modelSelect = document.getElementById("modelSelect");
+    const chatListEl = document.getElementById("chatList");
+    const messagesEl = document.getElementById("messages");
+    const composerForm = document.getElementById("composerForm");
+    const messageInput = document.getElementById("messageInput");
+    const imageInput = document.getElementById("imageInput");
 
-    const INSTR = {
-      vasya: {
-        "default": "Ти — Вася АІ. Відповідай чітко, повно і по суті, без зайвої води та вигаданих фактів." + BASE_HW_RULES,
-        "smart": "Ти — Вася АІ у режимі Смарт. Розбирай задачу логічно й зрозуміло, перевіряй кроки та факти." + BASE_HW_RULES,
-        "pro": "Ти — Вася АІ у режимі Про. Давай глибокий, структурований розбір із деталями, прикладами та поясненнями." + BASE_HW_RULES,
-        "pro+": "Ти — Вася АІ у режимі Про+. Працюй максимально ретельно й детально: охоплюй усі нюанси, перевіряй логіку й подавай матеріал чітко." + BASE_HW_RULES
-      }
-    };
+    let state = loadState();
+    let pendingImageBase64 = null;
 
-    let isThinking = false, thinkSeconds = 0, thinkTimer = null, pendingAttachment = null;
-
-    function createDefaultState() {
-      const id = "chat_" + Date.now();
+    function defaultState() {
+      const firstId = "chat_" + Date.now();
       return {
-        chats: { [id]: { id, title: "Новий чат", mode: "default", messages: [] } },
-        usage: {},
-        activeChatId: id
+        activeChatId: firstId,
+        mode: "auto",
+        chats: {
+          [firstId]: {
+            id: firstId,
+            title: "Новий чат",
+            messages: [
+              {
+                role: "assistant",
+                text: "Привіт! Я Вася AI 2.1.50. Знаю актуальну дату, вмію шукати в мережі, читаю фото й готовий до роботи."
+              }
+            ]
+          }
+        }
       };
     }
 
     function loadState() {
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
-        if (!raw) return createDefaultState();
-        const p = JSON.parse(raw);
-        if (!p.chats || !Object.keys(p.chats).length) return createDefaultState();
-        if (!p.usage) p.usage = {};
-        return p;
-      } catch (e) {
-        return createDefaultState();
+        if (!raw) return defaultState();
+        const parsed = JSON.parse(raw);
+        if (!parsed.chats || !parsed.activeChatId || !parsed.chats[parsed.activeChatId]) {
+          return defaultState();
+        }
+        return parsed;
+      } catch {
+        return defaultState();
       }
     }
-
-    let state = loadState();
 
     function saveState() {
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      } catch {}
     }
 
-    function toggleMenu(open) {
-      document.getElementById("sidebar").classList.toggle("open", open);
-      document.getElementById("backdrop").classList.toggle("show", open);
+    function setSidebarOpen(isOpen) {
+      sidebar.classList.toggle("open", isOpen);
+      backdrop.classList.toggle("open", isOpen);
     }
 
-    function getActiveChat() {
-      if (!state.chats[state.activeChatId]) {
-        state.activeChatId = Object.keys(state.chats)[0];
+    openSidebarBtn.addEventListener("click", () => setSidebarOpen(true));
+    closeSidebarBtn.addEventListener("click", () => setSidebarOpen(false));
+    backdrop.addEventListener("click", () => setSidebarOpen(false));
+
+    let touchStartX = 0;
+    let touchStartY = 0;
+
+    document.addEventListener("touchstart", (e) => {
+      if (!e.touches.length) return;
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+    }, { passive: true });
+
+    document.addEventListener("touchend", (e) => {
+      if (!e.changedTouches.length) return;
+      const dx = e.changedTouches[0].clientX - touchStartX;
+      const dy = e.changedTouches[0].clientY - touchStartY;
+
+      if (Math.abs(dx) > 65 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+        if (dx > 0 && touchStartX < 55 && !sidebar.classList.contains("open")) {
+          setSidebarOpen(true);
+        } else if (dx < 0 && sidebar.classList.contains("open")) {
+          setSidebarOpen(false);
+        }
       }
-      const c = state.chats[state.activeChatId];
-      if (!MODES[c.mode]) c.mode = "default";
-      return c;
-    }
+    }, { passive: true });
 
-    function handleFileSelect(ev) {
-      const file = ev.target.files && ev.target.files[0];
-      const prev = document.getElementById("attachPreview");
-      if (!file) {
-        pendingAttachment = null;
-        prev.style.display = "none";
-        prev.textContent = "";
-        return;
-      }
-      if (file.type.startsWith("image/")) {
-        const reader = new FileReader();
-        reader.onload = () => {
-          pendingAttachment = { name: file.name, type: file.type, dataUrl: reader.result };
-          prev.style.display = "block";
-          prev.textContent = "Прикріплено зображення: " + file.name;
-        };
-        reader.readAsDataURL(file);
-      } else {
-        const reader = new FileReader();
-        reader.onload = () => {
-          pendingAttachment = { name: file.name, type: file.type || "text/plain", textContent: String(reader.result || "") };
-          prev.style.display = "block";
-          prev.textContent = "Прикріплено файл: " + file.name;
-        };
-        reader.readAsText(file);
-      }
-    }
+    modelSelect.value = state.mode || "auto";
+    modelSelect.addEventListener("change", () => {
+      state.mode = modelSelect.value;
+      saveState();
+    });
 
-    function startThinking() {
-      stopThinking();
-      isThinking = true;
-      thinkSeconds = 0;
-      thinkTimer = setInterval(() => {
-        thinkSeconds += 1;
-        const el = document.getElementById("thinkingText");
-        if (el) el.textContent = `Вася думає... (${thinkSeconds} сек)`;
-      }, 1000);
-    }
-
-    function stopThinking() {
-      isThinking = false;
-      if (thinkTimer) {
-        clearInterval(thinkTimer);
-        thinkTimer = null;
-      }
-    }
-
-    function newChat() {
-      if (isThinking) return;
-      const cur = getActiveChat();
+    newChatBtn.addEventListener("click", () => {
       const id = "chat_" + Date.now();
-      state.chats[id] = { id, title: "Новий чат", mode: cur.mode || "default", messages: [] };
+      state.chats[id] = {
+        id,
+        title: "Новий чат",
+        messages: []
+      };
       state.activeChatId = id;
       saveState();
-      render();
-    }
+      renderAll();
+      setSidebarOpen(false);
+    });
 
-    function selectChat(id) {
-      if (isThinking || !state.chats[id]) return;
-      state.activeChatId = id;
-      saveState();
-      render();
-    }
-
-    function changeMode(mode) {
-      if (isThinking || !MODES[mode]) return;
-      const c = getActiveChat();
-      c.mode = mode;
-      saveState();
-      render();
-    }
-
-    async function renderRichText(target, text) {
-      if (window.marked) {
-        target.innerHTML = window.marked.parse(text || "");
-      } else {
-        target.textContent = text || "";
-      }
-      if (window.MathJax && window.MathJax.typesetPromise) {
-        try { await window.MathJax.typesetPromise([target]); } catch (e) {}
-      }
-    }
-
-    async function render() {
-      const chat = getActiveChat();
-      const m = MODES[chat.mode] || MODES.default;
-      document.getElementById("modeSelect").value = chat.mode;
-      document.getElementById("sendBtn").disabled = isThinking;
-
-      const sideList = document.getElementById("sidebarChats");
-      sideList.innerHTML = "";
-      Object.values(state.chats).forEach((c) => {
-        const b = document.createElement("button");
-        b.type = "button";
-        b.className = "chat-btn" + (c.id === chat.id ? " active" : "");
-        b.textContent = c.title || "Чат";
-        b.onclick = () => { selectChat(c.id); toggleMenu(false); };
-        sideList.appendChild(b);
-      });
-
-      const quotaBox = document.getElementById("quotaBox");
-      if (m.limit == null) {
-        quotaBox.textContent = `Вася ${m.sfx}: безліміт`;
-      } else {
-        const used = state.usage[chat.mode] || 0;
-        const rem = Math.max(0, m.limit - used);
-        quotaBox.textContent = `Вася ${m.sfx}: залишилось ${rem}/${m.limit}`;
-      }
-
-      const msgBox = document.getElementById("messagesBox");
-      msgBox.innerHTML = "";
-
-      for (const item of (chat.messages || [])) {
-        if (item.role === "error") {
-          const wrap = document.createElement("div");
-          wrap.className = "msg-wrap error";
-
-          const div = document.createElement("div");
-          div.className = "msg error-msg";
-
-          const who = document.createElement("div");
-          who.className = "who";
-          who.textContent = "Вася";
-          div.appendChild(who);
-
-          const body = document.createElement("div");
-          body.textContent = item.text || "Помилка запиту.";
-          div.appendChild(body);
-
-          if (item.retryText || item.retryAttachment) {
-            const btn = document.createElement("button");
-            btn.type = "button";
-            btn.className = "retry-btn";
-            btn.textContent = "Повторити";
-            btn.disabled = isThinking;
-            btn.onclick = () => retryMessage(item.retryText || "", item.retryAttachment || null);
-            div.appendChild(btn);
-          }
-
-          wrap.appendChild(div);
-          msgBox.appendChild(wrap);
-          continue;
-        }
-
-        const wrap = document.createElement("div");
-        wrap.className = "msg-wrap " + (item.role === "user" ? "user" : "assistant");
-
-        const div = document.createElement("div");
-        div.className = "msg";
-
-        const who = document.createElement("div");
-        who.className = "who";
-        who.textContent = item.role === "user" ? "Ти" : "Вася";
-        div.appendChild(who);
-
-        const body = document.createElement("div");
-        await renderRichText(body, item.text);
-        div.appendChild(body);
-        wrap.appendChild(div);
-
-        if (item.role === "assistant" && item.showMistakeNote) {
-          const note = document.createElement("div");
-          note.className = "ai-note";
-          note.textContent = "Вася АІ — це ШІ і може помилятися.";
-          wrap.appendChild(note);
-        }
-
-        msgBox.appendChild(wrap);
-      }
-
-      if (isThinking) {
-        const tWrap = document.createElement("div");
-        tWrap.className = "msg-wrap assistant";
-        const t = document.createElement("div");
-        t.className = "msg thinking";
-        t.id = "thinkingText";
-        t.textContent = `Вася думає... (${thinkSeconds} сек)`;
-        tWrap.appendChild(t);
-        msgBox.appendChild(tWrap);
-      }
-
-      window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
-    }
-
-    async function askInstruction(instruction, messages, mode) {
-      const apiMessages = messages
-        .filter((m) => m.role === "user" || m.role === "assistant")
-        .map((m) => ({
-          role: m.role,
-          text: m.text,
-          attachment: m.attachment || null
-        }));
-
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          system: instruction,
-          mode: mode,
-          messages: apiMessages
-        })
-      });
-      let data = {};
-      try { data = await res.json(); } catch (e) {}
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      return data.reply || data.text || "Порожня відповідь";
-    }
-
-    async function sendPrompt(text, attachment, clearInputAfter = false) {
-      if (isThinking) return;
-      if (!text && !attachment) return;
-
-      const chat = getActiveChat();
-      const m = MODES[chat.mode] || MODES.default;
-
-      if (m.limit != null && (state.usage[chat.mode] || 0) >= m.limit) {
-        chat.messages.push({
-          role: "error",
-          text: `Ліміт для режиму ${m.sfx} вичерпано.`,
-          retryText: "",
-          retryAttachment: null
-        });
-        saveState();
-        await render();
+    imageInput.addEventListener("change", () => {
+      const file = imageInput.files && imageInput.files[0];
+      if (!file) {
+        pendingImageBase64 = null;
         return;
       }
+      const reader = new FileReader();
+      reader.onload = () => {
+        pendingImageBase64 = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
 
-      const firstTitle = chat.title === "Новий чат";
-      const displayText = text || (attachment ? `Файл: ${attachment.name}` : "");
-      chat.messages.push({ role: "user", text: displayText, attachment: attachment || null });
-      if (firstTitle) chat.title = (text || (attachment && attachment.name) || "Чат").slice(0, 32);
+    function renderChatList() {
+      chatListEl.innerHTML = "";
+      const ids = Object.keys(state.chats).reverse();
+      for (const id of ids) {
+        const chat = state.chats[id];
+        const item = document.createElement("div");
+        item.className = "chat-item" + (id === state.activeChatId ? " active" : "");
 
-      if (clearInputAfter) {
-        document.getElementById("msgInput").value = "";
-        pendingAttachment = null;
-        document.getElementById("fileInput").value = "";
-        const prev = document.getElementById("attachPreview");
-        prev.style.display = "none";
-        prev.textContent = "";
+        const titleEl = document.createElement("span");
+        titleEl.className = "chat-title";
+        titleEl.textContent = chat.title || "Чат";
+        titleEl.addEventListener("click", () => {
+          state.activeChatId = id;
+          saveState();
+          renderAll();
+          setSidebarOpen(false);
+        });
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "del-btn";
+        delBtn.type = "button";
+        delBtn.textContent = "🗑";
+        delBtn.title = "Видалити чат";
+        delBtn.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          delete state.chats[id];
+          const remaining = Object.keys(state.chats);
+          if (remaining.length === 0) {
+            state = defaultState();
+          } else if (state.activeChatId === id) {
+            state.activeChatId = remaining[remaining.length - 1];
+          }
+          saveState();
+          renderAll();
+        });
+
+        item.appendChild(titleEl);
+        item.appendChild(delBtn);
+        chatListEl.appendChild(item);
+      }
+    }
+
+    function renderMessages() {
+      messagesEl.innerHTML = "";
+      const activeChat = state.chats[state.activeChatId];
+      if (!activeChat) return;
+
+      for (const msg of activeChat.messages) {
+        const bubble = document.createElement("div");
+        bubble.className = "msg " + msg.role;
+
+        if (msg.image) {
+          const img = document.createElement("img");
+          img.src = msg.image;
+          img.alt = "Прикріплене фото";
+          bubble.appendChild(img);
+        }
+        if (msg.text) {
+          const span = document.createElement("span");
+          span.textContent = msg.text;
+          bubble.appendChild(span);
+        }
+        messagesEl.appendChild(bubble);
+      }
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function renderAll() {
+      renderChatList();
+      renderMessages();
+    }
+
+    composerForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = messageInput.value.trim();
+      const imageToSend = pendingImageBase64;
+      if (!text && !imageToSend) return;
+
+      const activeChat = state.chats[state.activeChatId];
+      if (activeChat.title === "Новий чат" && text) {
+        activeChat.title = text.slice(0, 32);
       }
 
+      activeChat.messages.push({
+        role: "user",
+        text,
+        image: imageToSend || null
+      });
+
+      const thinkingMsg = { role: "assistant", text: "Думаю..." };
+      activeChat.messages.push(thinkingMsg);
       saveState();
-      startThinking();
-      await render();
+      renderAll();
+
+      messageInput.value = "";
+      imageInput.value = "";
+      pendingImageBase64 = null;
 
       try {
-        const sys = (INSTR.vasya && INSTR.vasya[chat.mode]) || INSTR.vasya.default;
-        const reply = await askInstruction(sys, chat.messages, chat.mode);
-        chat.messages.push({ role: "assistant", text: reply, showMistakeNote: true });
-        if (m.limit != null) state.usage[chat.mode] = (state.usage[chat.mode] || 0) + 1;
-        saveState();
-      } catch (err) {
-        chat.messages.push({
-          role: "error",
-          text: "Помилка запиту: " + err.message,
-          retryText: text,
-          retryAttachment: attachment || null
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: text,
+            model_mode: modelSelect.value,
+            image: imageToSend,
+            history: activeChat.messages.slice(-8, -1).map((m) => ({
+              role: m.role,
+              content: m.text || ""
+            }))
+          })
         });
-        saveState();
-      } finally {
-        stopThinking();
-        await render();
+        const data = await res.json();
+        thinkingMsg.text = data.reply || data.response || data.error || "Порожня відповідь від сервера.";
+      } catch {
+        thinkingMsg.text = "Не вдалося з'єднатися з сервером.";
       }
-    }
 
-    async function retryMessage(retryText, retryAttachment) {
-      if (isThinking) return;
-      const chat = getActiveChat();
-      const last = chat.messages[chat.messages.length - 1];
-      if (last && last.role === "error") {
-        chat.messages.pop();
-      }
-      const prevUser = chat.messages[chat.messages.length - 1];
-      if (prevUser && prevUser.role === "user") {
-        chat.messages.pop();
-      }
       saveState();
-      await sendPrompt(retryText, retryAttachment, false);
-    }
+      renderAll();
+    });
 
-    async function handleSend(e) {
-      e.preventDefault();
-      if (isThinking) return;
-      const input = document.getElementById("msgInput");
-      const text = input.value.trim();
-      const att = pendingAttachment;
-      await sendPrompt(text, att, true);
-    }
-
-    render();
+    renderAll();
   </script>
 </body>
 </html>
-'''
-def _build_openrouter_messages(raw_msgs, system_text: str, context_block: str = "") -> List[dict]:
-    out: List[dict] = []
-
-    merged_sys = (system_text or "").strip()
-    if context_block:
-        merged_sys = (
-            f"{merged_sys}\n\nДовідковий контекст із підібраних джерел:\n{context_block}\n"
-            "Спирайся на цей контекст, якщо він відповідає питанню."
-        ).strip()
-
-    if merged_sys:
-        out.append({"role": "system", "content": merged_sys})
-
-    if not isinstance(raw_msgs, list):
-        return out
-
-    for item in raw_msgs[-20:]:
-        if not isinstance(item, dict):
-            continue
-        role = "assistant" if item.get("role") == "assistant" else "user"
-        text = str(item.get("text") or "")[:8000]
-        parts: List[dict] = []
-
-        if text:
-            parts.append({"type": "text", "text": text})
-
-        att = item.get("attachment")
-        if isinstance(att, dict) and role == "user":
-            att_name = str(att.get("name") or "file")
-            att_type = str(att.get("type") or "")
-            att_text = str(att.get("textContent") or "")[:12000]
-            att_data_url = str(att.get("dataUrl") or "")
-
-            if att_type.startswith("image/") and att_data_url:
-                parsed = _parse_data_url(att_data_url)
-                if parsed:
-                    mime, clean_b64 = parsed
-                    parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime};base64,{clean_b64}"}
-                    })
-                    if not text:
-                        parts.append({"type": "text", "text": f"Проаналізуй зображення/графік/таблицю: {att_name}"})
-            elif att_text:
-                parts.append({"type": "text", "text": f"[Вкладений файл {att_name}]\n{att_text}"})
-                if not text:
-                    parts.append({"type": "text", "text": f"Проаналізуй дані з файлу {att_name}"})
-
-        if parts:
-            if len(parts) == 1 and parts[0]["type"] == "text":
-                out.append({"role": role, "content": parts[0]["text"]})
-            else:
-                out.append({"role": role, "content": parts})
-
-    return out
-
-
-def _pick_openrouter_models(mode: str, query_text: str) -> List[str]:
-    q = (query_text or "").strip()
-    is_complex = (
-        mode in ("pro", "pro+")
-        or len(q) > 220
-        or any(k in q.lower() for k in (
-            "рівняння", "інтеграл", "похідна", "довод", "розв'яжи", "задача",
-            "поясни детально", "порівняй", "аналіз", "код", "python", "скрипт"
-        ))
-    )
-
-    ordered: List[str] = []
-    if OPENROUTER_DEFAULT_MODEL:
-        ordered.append(OPENROUTER_DEFAULT_MODEL)
-
-    if is_complex:
-        ordered.extend([OPENROUTER_SMART_MODEL, OPENROUTER_FAST_MODEL])
-    else:
-        ordered.extend([OPENROUTER_FAST_MODEL, OPENROUTER_SMART_MODEL])
-
-    ordered.extend(OPENROUTER_BACKUP_MODELS)
-
-    final_models: List[str] = []
-    for m in ordered:
-        clean = (m or "").strip().lower()
-        if clean and clean not in final_models:
-            final_models.append(clean)
-    return final_models
-
-
-def call_openrouter_fallback(raw_msgs, system_text: str, mode: str, query_text: str, context_block: str = ""):
-    keys = _load_openrouter_keys()
-    if not keys:
-        return None, "Не задано жодного ключа OpenRouter"
-
-    models = _pick_openrouter_models(mode, query_text)
-    if not models:
-        return None, "Не задано моделей OpenRouter"
-
-    messages = _build_openrouter_messages(raw_msgs, system_text, context_block)
-    if not messages:
-        return None, "Порожні повідомлення для OpenRouter"
-
-    started_at = time.monotonic()
-    budgets = {"default": 22.0, "smart": 24.0, "pro": 24.0, "pro+": 24.0}
-    max_total_budget = budgets.get(mode, 22.0)
-    last_err = "Усі моделі та ключі OpenRouter не відповіли"
-
-    for model_id in models:
-        for api_key in keys:
-            elapsed = time.monotonic() - started_at
-            remaining = max_total_budget - elapsed
-            if remaining < 2.5:
-                return None, f"Замало часу до ліміту відповіді ({last_err})"
-
-            per_call_timeout = min(6.0, max(2.5, remaining - 0.5))
-            payload = {
-                "model": model_id,
-                "messages": messages,
-                "temperature": 0.4 if mode == "default" else 0.3,
-            }
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://vasya-ai.vercel.app",
-                "X-Title": "Vasya AI",
-            }
-
-            try:
-                r = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
-                    timeout=per_call_timeout,
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    choices = data.get("choices") or []
-                    if choices:
-                        msg = choices[0].get("message") or {}
-                        content = msg.get("content")
-                        if isinstance(content, list):
-                            txt = "".join(
-                                str(part.get("text") or "")
-                                for part in content
-                                if isinstance(part, dict) and part.get("type") == "text"
-                            ).strip()
-                        else:
-                            txt = str(content or "").strip()
-                        if txt:
-                            return txt, None
-
-                try:
-                    detail = r.json().get("error", {}).get("message", "")
-                except Exception:
-                    detail = r.text[:180]
-                last_err = f"[{model_id}] HTTP {r.status_code}: {detail}"
-                continue
-            except requests.Timeout:
-                last_err = f"[{model_id}] таймаут"
-                continue
-            except Exception as e:
-                last_err = f"[{model_id}] {e}"
-                continue
-
-    return None, last_err
-
-
-@app.after_request
-def cors(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    return resp
-
-
-def err(msg, code):
-    return jsonify({"error": msg}), code
-
-
-@app.route("/", methods=["GET"])
-def index():
-    return Response(PAGE, mimetype="text/html")
-
-
-@app.route("/icon.png", methods=["GET"])
-@app.route("/favicon.ico", methods=["GET"])
-def icon():
-    return send_from_directory(BASE, "icon.png", mimetype="image/png")
-
-
-@app.route("/api/index", methods=["GET", "POST", "OPTIONS"])
-def index_or_chat():
-    if request.method == "GET":
-        return Response(PAGE, mimetype="text/html")
-    return chat()
-
-
-@app.route("/api/chat", methods=["POST", "OPTIONS"])
-def chat():
-    if request.method == "OPTIONS":
-        return "", 204
-
-    data = request.get_json(silent=True) or {}
-    system_text = str(data.get("system") or "")[:4000]
-    mode = data.get("mode") if data.get("mode") in ("default", "smart", "pro", "pro+") else "default"
-    raw_msgs = data.get("messages")
-    last_user_text = ""
-    has_user_msg = False
-
-    if isinstance(raw_msgs, list):
-        for item in raw_msgs[-20:]:
-            if not isinstance(item, dict):
-                continue
-            role = "assistant" if item.get("role") == "assistant" else "user"
-            text = str(item.get("text") or "")[:8000]
-            att = item.get("attachment")
-            has_att = isinstance(att, dict) and role == "user" and (
-                (str(att.get("type") or "").startswith("image/") and bool(str(att.get("dataUrl") or "").strip()))
-                or bool(str(att.get("textContent") or "").strip())
-            )
-
-            if text or has_att:
-                if role == "user":
-                    has_user_msg = True
-                    if text:
-                        last_user_text = text
-                    elif has_att:
-                        att_name = str(att.get("name") or "file")
-                        last_user_text = f"Проаналізуй вкладення: {att_name}"
-
-    if not has_user_msg:
-        return err("Порожнє повідомлення", 400)
-
-    context_block = ""
-    if detect_topics(last_user_text) != ["general"]:
-        context_block = collect_topic_context(last_user_text, max_items=2)
-
-    fb_reply, fb_err = call_openrouter_fallback(
-        raw_msgs=raw_msgs,
-        system_text=system_text,
-        mode=mode,
-        query_text=last_user_text,
-        context_block=context_block,
-    )
-    if fb_reply:
-        return jsonify({"reply": fb_reply})
-
-    if DEBUG:
-        return err(f"OpenRouter: {fb_err}", 502)
-    return err("Сервіс тимчасово перевантажений. Спробуй ще раз за кілька секунд.", 503)
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-        

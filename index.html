@@ -1,4 +1,4 @@
-'<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="uk">
 <head>
   <meta charset="UTF-8" />
@@ -165,10 +165,12 @@
       background: #ffffff;
     }
     .msg {
-      max-width: 88%;
+      max-width: 92%;
+      min-width: 0;
       padding: 11px 14px;
       border-radius: 14px;
       line-height: 1.55;
+      overflow-wrap: anywhere;
       word-break: break-word;
       font-size: 15px;
     }
@@ -185,7 +187,18 @@
       color: #111827;
       border: 1px solid #e5e7eb;
       white-space: normal;
-      overflow-x: auto;
+      overflow-x: visible;
+    }
+    .msg.assistant > div,
+    .msg.assistant p,
+    .msg.assistant li,
+    .msg.assistant h1,
+    .msg.assistant h2,
+    .msg.assistant h3,
+    .msg.assistant h4 {
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .msg.assistant > :first-child {
       margin-top: 0;
@@ -220,18 +233,24 @@
       padding: 2px 5px;
       border-radius: 6px;
       font-size: 13.5px;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .msg.assistant pre {
       background: #f3f4f6;
       border: 1px solid #d1d5db;
       border-radius: 10px;
       padding: 10px;
+      max-width: 100%;
       overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
       margin: 8px 0;
     }
     .msg.assistant pre code {
       background: transparent;
       padding: 0;
+      overflow-wrap: normal;
+      word-break: normal;
     }
     .msg.assistant table {
       display: block;
@@ -924,5 +943,4 @@
     renderAll();
   </script>
 </body>
-  </html>
-  
+</html>

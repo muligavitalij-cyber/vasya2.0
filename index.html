@@ -10,8 +10,8 @@
     body {
       margin: 0;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #0f1115;
-      color: #f3f4f6;
+      background: #ffffff;
+      color: #111827;
       min-height: 100dvh;
       display: flex;
       flex-direction: column;
@@ -27,29 +27,29 @@
       justify-content: space-between;
       gap: 8px;
       padding: 10px 12px;
-      background: #161920;
-      border-bottom: 1px solid #262b36;
+      background: #f9fafb;
+      border-bottom: 1px solid #e5e7eb;
     }
     .icon-btn, .pill-btn {
-      background: #222733;
-      color: #f9fafb;
-      border: 1px solid #343b4d;
+      background: #ffffff;
+      color: #111827;
+      border: 1px solid #d1d5db;
       border-radius: 10px;
       padding: 8px 11px;
       font-size: 14px;
       cursor: pointer;
     }
     .icon-btn.listening {
-      background: #4b1d28;
-      border-color: #f43f5e;
-      color: #ffe4e6;
+      background: #fee2e2;
+      border-color: #ef4444;
+      color: #991b1b;
     }
     .model-select {
       flex: 1;
       max-width: 210px;
-      background: #222733;
-      color: #f9fafb;
-      border: 1px solid #343b4d;
+      background: #ffffff;
+      color: #111827;
+      border: 1px solid #d1d5db;
       border-radius: 10px;
       padding: 8px 10px;
       font-size: 14px;
@@ -61,23 +61,24 @@
       justify-content: space-between;
       gap: 8px;
       padding: 6px 12px;
-      background: #12151c;
-      border-bottom: 1px solid #222733;
+      background: #f3f4f6;
+      border-bottom: 1px solid #e5e7eb;
       font-size: 12px;
-      color: #cbd5e1;
+      color: #4b5563;
     }
     .tier-badge {
       padding: 2px 8px;
       border-radius: 999px;
-      background: #222733;
-      border: 1px solid #343b4d;
+      background: #ffffff;
+      color: #111827;
+      border: 1px solid #d1d5db;
       font-weight: 600;
     }
 
     .backdrop {
       position: fixed;
       inset: 0;
-      background: rgba(0, 0, 0, 0.55);
+      background: rgba(17, 24, 39, 0.35);
       opacity: 0;
       pointer-events: none;
       transition: opacity 0.2s ease;
@@ -95,8 +96,8 @@
       bottom: 0;
       width: 80%;
       max-width: 320px;
-      background: #171a22;
-      border-right: 1px solid #2a303d;
+      background: #ffffff;
+      border-right: 1px solid #e5e7eb;
       transform: translateX(-100%);
       transition: transform 0.22s ease;
       z-index: 40;
@@ -111,7 +112,8 @@
       align-items: center;
       justify-content: space-between;
       padding: 12px 14px;
-      border-bottom: 1px solid #262b36;
+      border-bottom: 1px solid #e5e7eb;
+      background: #f9fafb;
     }
     .chat-list {
       flex: 1;
@@ -128,13 +130,15 @@
       gap: 8px;
       padding: 10px 12px;
       border-radius: 10px;
-      background: #1e232e;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
       cursor: pointer;
       font-size: 14px;
+      color: #111827;
     }
     .chat-item.active {
-      background: #2b354b;
-      border: 1px solid #4c6494;
+      background: #eff6ff;
+      border-color: #93c5fd;
     }
     .chat-title {
       overflow: hidden;
@@ -145,7 +149,7 @@
     .del-btn {
       background: transparent;
       border: none;
-      color: #9ca3af;
+      color: #6b7280;
       font-size: 15px;
       cursor: pointer;
       padding: 0 4px;
@@ -156,26 +160,30 @@
       padding: 14px 12px 96px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
       overflow-y: auto;
+      background: #ffffff;
     }
     .msg {
       max-width: 88%;
-      padding: 10px 13px;
+      padding: 11px 14px;
       border-radius: 14px;
-      line-height: 1.5;
+      line-height: 1.55;
       word-break: break-word;
       font-size: 15px;
     }
     .msg.user {
       align-self: flex-end;
-      background: #26416b;
+      background: #e8f0fe;
+      color: #111827;
+      border: 1px solid #c7dafc;
       white-space: pre-wrap;
     }
     .msg.assistant {
       align-self: flex-start;
-      background: #1c2029;
-      border: 1px solid #2b3140;
+      background: #f9fafb;
+      color: #111827;
+      border: 1px solid #e5e7eb;
       white-space: normal;
       overflow-x: auto;
     }
@@ -191,7 +199,7 @@
     .msg.assistant h4 {
       margin: 12px 0 6px;
       line-height: 1.3;
-      color: #f9fafb;
+      color: #111827;
     }
     .msg.assistant h2 { font-size: 18px; }
     .msg.assistant h3 { font-size: 16px; }
@@ -207,14 +215,15 @@
       margin-bottom: 4px;
     }
     .msg.assistant code {
-      background: #262c38;
+      background: #eef2f7;
+      color: #111827;
       padding: 2px 5px;
       border-radius: 6px;
       font-size: 13.5px;
     }
     .msg.assistant pre {
-      background: #12151c;
-      border: 1px solid #2a303d;
+      background: #f3f4f6;
+      border: 1px solid #d1d5db;
       border-radius: 10px;
       padding: 10px;
       overflow-x: auto;
@@ -235,13 +244,13 @@
     }
     .msg.assistant th,
     .msg.assistant td {
-      border: 1px solid #303746;
+      border: 1px solid #d1d5db;
       padding: 6px 9px;
       text-align: left;
       white-space: nowrap;
     }
     .msg.assistant th {
-      background: #232936;
+      background: #f3f4f6;
     }
     .msg img {
       display: block;
@@ -249,6 +258,7 @@
       max-height: 220px;
       border-radius: 10px;
       margin-bottom: 6px;
+      border: 1px solid #e5e7eb;
     }
 
     .composer-wrap {
@@ -256,8 +266,8 @@
       left: 0;
       right: 0;
       bottom: 0;
-      background: #161920;
-      border-top: 1px solid #262b36;
+      background: #f9fafb;
+      border-top: 1px solid #e5e7eb;
       z-index: 15;
     }
     .attachment-bar {
@@ -266,7 +276,7 @@
       gap: 8px;
       padding: 6px 12px 0;
       font-size: 12px;
-      color: #cbd5e1;
+      color: #374151;
     }
     .attachment-bar.active {
       display: flex;
@@ -276,12 +286,12 @@
       height: 34px;
       object-fit: cover;
       border-radius: 6px;
-      border: 1px solid #343b4d;
+      border: 1px solid #d1d5db;
     }
     .clear-att-btn {
-      background: #222733;
-      color: #f87171;
-      border: 1px solid #343b4d;
+      background: #ffffff;
+      color: #dc2626;
+      border: 1px solid #d1d5db;
       border-radius: 8px;
       padding: 2px 8px;
       font-size: 12px;
@@ -296,17 +306,20 @@
     .composer input[type="text"] {
       flex: 1;
       min-width: 0;
-      background: #222733;
-      color: #f9fafb;
-      border: 1px solid #343b4d;
+      background: #ffffff;
+      color: #111827;
+      border: 1px solid #d1d5db;
       border-radius: 12px;
       padding: 10px 12px;
       font-size: 15px;
       outline: none;
     }
+    .composer input[type="text"]:focus {
+      border-color: #2563eb;
+    }
     .send-btn {
-      background: #3b66f5;
-      color: #fff;
+      background: #2563eb;
+      color: #ffffff;
       border: none;
       border-radius: 12px;
       padding: 10px 13px;
@@ -317,7 +330,7 @@
   </style>
 </head>
 <body>
-<header class="top-bar">
+  <header class="top-bar">
     <button id="openSidebarBtn" class="icon-btn" type="button" aria-label="Відкрити чати">☰</button>
     <select id="modelSelect" class="model-select" aria-label="Вибір режиму або моделі">
       <option value="auto">Авто (ланцюжок)</option>
@@ -360,7 +373,6 @@
       <button id="sendBtn" class="send-btn" type="submit">Надіслати</button>
     </form>
   </div>
-
   <script>
     const STORAGE_KEY = "vasya_ai_2_1_70_chats";
     const DAILY_LIMIT = 250;

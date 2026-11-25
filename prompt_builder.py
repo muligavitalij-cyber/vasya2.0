@@ -50,34 +50,65 @@ def clean_display_text(text: str) -> str:
 
     text = re.sub(r"```[\s\S]*?```|`[^`\n]+`", _save_block, text)
 
+    # Прибираємо обгортки $$...$$ та $...$, зберігаючи вміст
     text = re.sub(r"\$\$([\s\S]*?)\$\$", r"\1", text)
     text = re.sub(r"(?<!\\)\$([^$\n]+?)(?<!\\)\$", r"\1", text)
 
-    while re.search(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", text):
-        text = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"(\1)/(\2)", text)
+    # Спочатку розкриваємо текстові макроси всередині формул
+    for _ in range(3):
+        text = re.sub(
+            r"\\(?:text|mathrm|mathbf|textbf|operatorname)\{([^{}]*)\}",
+            r"\1",
+            text,
+        )
 
-    text = re.sub(r"\(([0-9a-zA-Zа-яА-ЯіІїЇєЄґҐ]+)\)/\(([0-9a-zA-Zа-яА-ЯіІїЇєЄґҐ]+)\)", r"\1/\2", text)
+    # Період у числі на кшталт \overline{6} -> (6)
+    for _ in range(3):
+        text = re.sub(r"\\overline\{([^{}]+)\}", r"(\1)", text)
+
+    # Дроби \frac{a}{b} та \dfrac{a}{b} -> a/b
+    for _ in range(5):
+        updated = re.sub(
+            r"\\d?frac\{([^{}]+)\}\{([^{}]+)\}",
+            r"(\1)/(\2)",
+            text,
+        )
+        if updated == text:
+            break
+        text = updated
+
+    # Спрощуємо зайві круглі дужки навколо простих частин дробу
+    text = re.sub(r"\(([0-9A-Za-zА-Яа-яІіЇїЄєҐґ.,\s]+)\)/", r"\1/", text)
+    text = re.sub(r"/\(([0-9A-Za-zА-Яа-яІіЇїЄєҐґ.,\s]+)\)", r"/\1", text)
 
     replacements = {
         "\\times": "×",
         "\\cdot": "·",
         "\\div": "÷",
         "\\pm": "±",
+        "\\mp": "∓",
         "\\neq": "≠",
         "\\approx": "≈",
+        "\\simeq": "≃",
+        "\\equiv": "≡",
         "\\leq": "≤",
         "\\geq": "≥",
         "\\rightarrow": "→",
+        "\\leftarrow": "←",
         "\\Rightarrow": "⇒",
+        "\\Leftarrow": "⇐",
+        "\\%": "%",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
 
-    text = re.sub(r"\\(?:text|mathrm|mathbf|textbf)\{([^{}]+)\}", r"\1", text)
-
+    # Прибираємо команди LaTeX, що залишилися, та зайві фігурні дужки
     text = re.sub(r"\\[a-zA-Z]+", "", text)
     text = text.replace("{", "").replace("}", "")
 
+    # Прибираємо подвійні пробіли після чистки, але зберігаємо переноси рядків і Markdown
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r" \n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
     for idx, block in enumerate(code_blocks):

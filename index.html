@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+'<!DOCTYPE html>
 <html lang="uk">
 <head>
   <meta charset="UTF-8" />
@@ -261,6 +261,23 @@
       border: 1px solid #e5e7eb;
     }
 
+    .book-frac {
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      vertical-align: middle;
+      line-height: 1.05;
+      margin: 0 2px;
+      font-size: 0.88em;
+    }
+    .book-frac-num {
+      padding: 0 3px 1px 3px;
+      border-bottom: 1.5px solid currentColor;
+    }
+    .book-frac-den {
+      padding: 1px 3px 0 3px;
+    }
+
     .composer-wrap {
       position: fixed;
       left: 0;
@@ -464,6 +481,91 @@
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       } catch {}
+    }
+
+    function renderBookFractions(containerEl) {
+      if (!containerEl) return;
+
+      const walker = document.createTreeWalker(containerEl, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          if (!node.nodeValue || !node.nodeValue.includes("/")) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          const parent = node.parentElement;
+          if (!parent || parent.closest("code, pre, .book-frac, a")) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      });
+
+      const textNodes = [];
+      while (walker.nextNode()) {
+        textNodes.push(walker.currentNode);
+      }
+
+      const fracRegex = /(^|[\s(=+\-×·÷≈<>])(\d{1,4})\s*\/\s*(\d{1,4})(?=[\s)=+\-×·÷≈<>.,;!?]|$)/g;
+
+      for (const node of textNodes) {
+        const text = node.nodeValue;
+        fracRegex.lastIndex = 0;
+        if (!fracRegex.test(text)) continue;
+
+        fracRegex.lastIndex = 0;
+        const frag = document.createDocumentFragment();
+        let lastIndex = 0;
+        let match;
+        let changed = false;
+
+        while ((match = fracRegex.exec(text)) !== null) {
+          const prefix = match[1] || "";
+          const num = match[2];
+          const den = match[3];
+          const matchStart = match.index;
+          const fullMatch = match[0];
+
+          const isLikelyDate =
+            Number(num) >= 1 &&
+            Number(num) <= 31 &&
+            Number(den) >= 1 &&
+            Number(den) <= 12 &&
+            !/[=+\-×·÷≈]/.test(prefix);
+
+          if (isLikelyDate) continue;
+
+          changed = true;
+          if (matchStart > lastIndex) {
+            frag.appendChild(document.createTextNode(text.slice(lastIndex, matchStart)));
+          }
+          if (prefix) {
+            frag.appendChild(document.createTextNode(prefix));
+          }
+
+          const span = document.createElement("span");
+          span.className = "book-frac";
+
+          const numEl = document.createElement("span");
+          numEl.className = "book-frac-num";
+          numEl.textContent = num;
+
+          const denEl = document.createElement("span");
+          denEl.className = "book-frac-den";
+          denEl.textContent = den;
+
+          span.appendChild(numEl);
+          span.appendChild(denEl);
+          frag.appendChild(span);
+
+          lastIndex = matchStart + fullMatch.length;
+        }
+
+        if (changed) {
+          if (lastIndex < text.length) {
+            frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+          }
+          node.parentNode.replaceChild(frag, node);
+        }
+      }
     }
 
     function updateAttachmentUi() {
@@ -725,6 +827,7 @@
           if (msg.role === "assistant" && typeof marked !== "undefined") {
             const bodyDiv = document.createElement("div");
             bodyDiv.innerHTML = marked.parse(msg.text);
+            renderBookFractions(bodyDiv);
             bubble.appendChild(bodyDiv);
           } else {
             const span = document.createElement("span");
@@ -821,4 +924,5 @@
     renderAll();
   </script>
 </body>
-</html>
+  </html>
+  

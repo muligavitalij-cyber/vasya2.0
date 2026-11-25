@@ -2,7 +2,7 @@ import os
 import time
 import requests
 from flask import Flask, jsonify, request, send_from_directory
-from prompt_builder import build_system_prompt
+from prompt_builder import build_system_prompt, clean_display_text
 from web_search import needs_web_search, web_search
 
 app = Flask(__name__)
@@ -301,6 +301,7 @@ def chat_endpoint():
             "remaining": remaining,
         }), 502
 
+    reply = clean_display_text(reply)
     bucket["used"] += cost
     new_remaining = max(0, bucket["limit"] - bucket["used"])
 

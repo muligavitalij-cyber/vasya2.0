@@ -189,6 +189,36 @@
       white-space: normal;
       overflow-x: visible;
     }
+    .msg-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      font-size: 12px;
+    }
+    .msg-author {
+      font-weight: 700;
+      color: #1d4ed8;
+    }
+    .speaking-badge {
+      display: none;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #dbeafe;
+      color: #1e40af;
+      font-weight: 600;
+      animation: speakPulse 1.2s infinite ease-in-out;
+    }
+    .speaking-badge.active {
+      display: inline-flex;
+    }
+    @keyframes speakPulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+
     .msg.assistant > div,
     .msg.assistant p,
     .msg.assistant li,
@@ -280,6 +310,47 @@
       border: 1px solid #e5e7eb;
     }
 
+    .ai-disclaimer {
+      margin-top: 8px;
+      padding-top: 6px;
+      border-top: 1px dashed #d1d5db;
+      font-size: 11.5px;
+      color: #6b7280;
+    }
+    .msg-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .msg-action-btn {
+      background: #ffffff;
+      color: #374151;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 4px 9px;
+      font-size: 12.5px;
+      cursor: pointer;
+    }
+    .msg-action-btn.active-like {
+      background: #dcfce7;
+      border-color: #4ade80;
+      color: #166534;
+      font-weight: 600;
+    }
+    .msg-action-btn.active-dislike {
+      background: #fee2e2;
+      border-color: #f87171;
+      color: #991b1b;
+      font-weight: 600;
+    }
+    .msg-action-btn.active-speak {
+      background: #dbeafe;
+      border-color: #60a5fa;
+      color: #1d4ed8;
+      font-weight: 600;
+    }
+
     .book-frac {
       display: inline-flex;
       flex-direction: column;
@@ -364,8 +435,8 @@
       cursor: pointer;
     }
   </style>
-</head>
-<body>
+  </head>
+  <body>
   <header class="top-bar">
     <button id="openSidebarBtn" class="icon-btn" type="button" aria-label="Відкрити чати">☰</button>
     <select id="modelSelect" class="model-select" aria-label="Вибір режиму або моделі">
@@ -409,6 +480,7 @@
       <button id="sendBtn" class="send-btn" type="submit">Надіслати</button>
     </form>
   </div>
+
   <script>
     const STORAGE_KEY = "vasya_ai_2_1_70_chats";
     const DAILY_LIMIT = 250;
@@ -445,6 +517,7 @@
 
     let state = loadState();
     let pendingImageBase64 = null;
+    let speakingIndex = null;
 
     function todayUtc() {
       return new Date().toISOString().slice(0, 10);
@@ -468,7 +541,8 @@
             messages: [
               {
                 role: "assistant",
-                text: "Привіт! Я Вася AI 2.1.70. Додав режим **Навчання / ДЗ**, голосовий ввід мікрофоном і акуратнішу роботу з фото задач."
+                text: "Привіт! Я Вася AI 2.1.70. Додав режим **Навчання / ДЗ**, голосовий ввід мікрофоном і акуратнішу роботу з фото задач.",
+                feedback: null
               }
             ]
           }
@@ -502,6 +576,114 @@
       } catch {}
     }
 
+    function stopSpeech(shouldRender = true) {
+      if ("speechSynthesis" in window) {
+        try {
+          window.speechSynthesis.cancel();
+        } catch {}
+      }
+      speakingIndex = null;
+      if (shouldRender) {
+        renderMessages();
+      }
+    }
+
+    function cleanForSpeech(rawText) {
+      return String(rawText || "")
+        .replace(/```[\s\S]*?```/g, " блок коду ")
+        .replace(/[*_`~#<>|]/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function pickUkrainianVoice() {
+      if (!("speechSynthesis" in window)) return null;
+      const voices = window.speechSynthesis.getVoices() || [];
+      return (
+        voices.find((v) => v.lang && v.lang.toLowerCase() === "uk-ua") ||
+        voices.find((v) => v.lang && v.lang.toLowerCase().startsWith("uk")) ||
+        null
+      );
+    }
+
+    function toggleSpeakMessage(msgIndex, text) {
+      if (!("speechSynthesis" in window)) {
+        alert("Цей браузер не підтримує озвучування.");
+        return;
+      }
+
+      const wasSpeakingThis = speakingIndex === msgIndex;
+      stopSpeech(false);
+
+      if (wasSpeakingThis) {
+        renderMessages();
+        return;
+      }
+
+      const cleaned = cleanForSpeech(text);
+      if (!cleaned) {
+        renderMessages();
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(cleaned);
+      utterance.lang = "uk-UA";
+      const uaVoice = pickUkrainianVoice();
+      if (uaVoice) {
+        utterance.voice = uaVoice;
+      }
+
+      speakingIndex = msgIndex;
+      renderMessages();
+
+      utterance.onend = () => {
+        if (speakingIndex === msgIndex) {
+          speakingIndex = null;
+          renderMessages();
+        }
+      };
+      utterance.onerror = () => {
+        if (speakingIndex === msgIndex) {
+          speakingIndex = null;
+          renderMessages();
+        }
+      };
+
+      try {
+        window.speechSynthesis.speak(utterance);
+      } catch {
+        speakingIndex = null;
+        renderMessages();
+      }
+    }
+
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.onvoiceschanged = () => {
+        pickUkrainianVoice();
+      };
+    }
+
+    async function copyMessageText(text, btnEl) {
+      const content = String(text || "");
+      if (!content) return;
+      try {
+        await navigator.clipboard.writeText(content);
+      } catch {
+        const temp = document.createElement("textarea");
+        temp.value = content;
+        document.body.appendChild(temp);
+        temp.select();
+        document.execCommand("copy");
+        document.body.removeChild(temp);
+      }
+      if (btnEl) {
+        const prev = btnEl.textContent;
+        btnEl.textContent = "✅ Скопійовано";
+        setTimeout(() => {
+          btnEl.textContent = prev;
+        }, 1400);
+      }
+    }
     function renderBookFractions(containerEl) {
       if (!containerEl) return;
 
@@ -703,6 +885,7 @@
     });
 
     newChatBtn.addEventListener("click", () => {
+      stopSpeech(false);
       const id = "chat_" + Date.now();
       state.chats[id] = {
         id,
@@ -797,6 +980,7 @@
         titleEl.className = "chat-title";
         titleEl.textContent = chat.title || "Чат";
         titleEl.addEventListener("click", () => {
+          stopSpeech(false);
           state.activeChatId = id;
           saveState();
           renderAll();
@@ -810,6 +994,9 @@
         delBtn.title = "Видалити чат";
         delBtn.addEventListener("click", (ev) => {
           ev.stopPropagation();
+          if (state.activeChatId === id) {
+            stopSpeech(false);
+          }
           delete state.chats[id];
           const remaining = Object.keys(state.chats);
           if (remaining.length === 0) {
@@ -832,9 +1019,26 @@
       const activeChat = state.chats[state.activeChatId];
       if (!activeChat) return;
 
-      for (const msg of activeChat.messages) {
+      activeChat.messages.forEach((msg, idx) => {
         const bubble = document.createElement("div");
         bubble.className = "msg " + msg.role;
+
+        if (msg.role === "assistant") {
+          const meta = document.createElement("div");
+          meta.className = "msg-meta";
+
+          const author = document.createElement("span");
+          author.className = "msg-author";
+          author.textContent = "Вася";
+          meta.appendChild(author);
+
+          const speakingBadge = document.createElement("span");
+          speakingBadge.className = "speaking-badge" + (speakingIndex === idx ? " active" : "");
+          speakingBadge.textContent = "🔊 Говорить...";
+          meta.appendChild(speakingBadge);
+
+          bubble.appendChild(meta);
+        }
 
         if (msg.image) {
           const img = document.createElement("img");
@@ -842,6 +1046,7 @@
           img.alt = "Прикріплене фото";
           bubble.appendChild(img);
         }
+
         if (msg.text) {
           if (msg.role === "assistant" && typeof marked !== "undefined") {
             const bodyDiv = document.createElement("div");
@@ -854,8 +1059,60 @@
             bubble.appendChild(span);
           }
         }
+
+        const isThinkingPlaceholder = msg.role === "assistant" && msg.text === "Думаю...";
+        if (msg.role === "assistant" && !isThinkingPlaceholder) {
+          const disclaimer = document.createElement("div");
+          disclaimer.className = "ai-disclaimer";
+          disclaimer.textContent = "Вася — це ШІ і може помилятися. Перевіряй важливі деталі.";
+          bubble.appendChild(disclaimer);
+
+          const actions = document.createElement("div");
+          actions.className = "msg-actions";
+
+          const copyBtn = document.createElement("button");
+          copyBtn.type = "button";
+          copyBtn.className = "msg-action-btn";
+          copyBtn.textContent = "📋 Копіювати";
+          copyBtn.addEventListener("click", () => copyMessageText(msg.text, copyBtn));
+
+          const likeBtn = document.createElement("button");
+          likeBtn.type = "button";
+          likeBtn.className = "msg-action-btn" + (msg.feedback === "like" ? " active-like" : "");
+          likeBtn.textContent = "👍";
+          likeBtn.addEventListener("click", () => {
+            msg.feedback = msg.feedback === "like" ? null : "like";
+            saveState();
+            renderMessages();
+          });
+
+          const dislikeBtn = document.createElement("button");
+          dislikeBtn.type = "button";
+          dislikeBtn.className = "msg-action-btn" + (msg.feedback === "dislike" ? " active-dislike" : "");
+          dislikeBtn.textContent = "👎";
+          dislikeBtn.addEventListener("click", () => {
+            msg.feedback = msg.feedback === "dislike" ? null : "dislike";
+            saveState();
+            renderMessages();
+          });
+
+          const speakBtn = document.createElement("button");
+          const isSpeakingThis = speakingIndex === idx;
+          speakBtn.type = "button";
+          speakBtn.className = "msg-action-btn" + (isSpeakingThis ? " active-speak" : "");
+          speakBtn.textContent = isSpeakingThis ? "⏹ Стоп" : "🔊 Звук";
+          speakBtn.addEventListener("click", () => toggleSpeakMessage(idx, msg.text));
+
+          actions.appendChild(copyBtn);
+          actions.appendChild(likeBtn);
+          actions.appendChild(dislikeBtn);
+          actions.appendChild(speakBtn);
+          bubble.appendChild(actions);
+        }
+
         messagesEl.appendChild(bubble);
-      }
+      });
+
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
@@ -883,6 +1140,8 @@
         return;
       }
 
+      stopSpeech(false);
+
       const activeChat = state.chats[state.activeChatId];
       if (activeChat.title === "Новий чат" && text) {
         activeChat.title = text.slice(0, 32);
@@ -894,7 +1153,7 @@
         image: imageToSend || null
       });
 
-      const thinkingMsg = { role: "assistant", text: "Думаю..." };
+      const thinkingMsg = { role: "assistant", text: "Думаю...", feedback: null };
       activeChat.messages.push(thinkingMsg);
       saveState();
       renderAll();
@@ -944,3 +1203,4 @@
   </script>
 </body>
 </html>
+  

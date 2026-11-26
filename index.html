@@ -219,6 +219,39 @@
       50% { opacity: 0.6; }
     }
 
+    .thoughts-wrap {
+      margin: 4px 0 8px;
+      border: 1px solid #dbe4f0;
+      background: #f1f5f9;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .thoughts-toggle {
+      width: 100%;
+      background: transparent;
+      border: none;
+      padding: 6px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      font-weight: 600;
+      color: #334155;
+      cursor: pointer;
+    }
+    .thoughts-panel {
+      display: none;
+      padding: 7px 10px 8px;
+      border-top: 1px dashed #cbd5e1;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #475569;
+      white-space: pre-line;
+    }
+    .thoughts-wrap.open .thoughts-panel {
+      display: block;
+    }
+
     .msg.assistant > div,
     .msg.assistant p,
     .msg.assistant li,
@@ -448,7 +481,7 @@
       cursor: pointer;
     }
   </style>
-</head>
+  </head>
 <body>
   <header class="top-bar">
     <button id="openSidebarBtn" class="icon-btn" type="button" aria-label="Відкрити чати">☰</button>
@@ -556,6 +589,7 @@
                 role: "assistant",
                 text: "Привіт! Я Вася AI 2.1.70. Додав режим **Навчання / ДЗ**, голосовий ввід мікрофоном і акуратнішу роботу з фото задач.",
                 photos: [],
+                thoughts: "Готовий приймати запити, фото та голос.",
                 feedback: null
               }
             ]
@@ -588,6 +622,37 @@
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       } catch {}
+    }
+
+    function buildThoughtsTrace({ userText, replyText, photos, effectiveMode, hadImage, isError }) {
+      const lines = [];
+      lines.push(`• Режим роботи: ${effectiveMode || "auto"}`);
+      if (hadImage) {
+        lines.push("• Підключив розпізнавання прикріпленого фото");
+      }
+      const lower = String(userText || "").toLowerCase();
+      const photoList = Array.isArray(photos) ? photos : [];
+
+      if (/фото|картинк|зображен|покаж|скин|photo|image/i.test(lower) || photoList.length > 0) {
+        lines.push(
+          photoList.length > 0
+            ? `• Пошук фото: Pixabay — знайшов (${photoList.length})`
+            : "• Пошук фото: Pixabay — підходящого фото не знайшлося"
+        );
+      }
+
+      if (/новин|курс|погод|сьогодні|2026|хто такий|що таке|де /i.test(lower)) {
+        lines.push("• Перевіряв дані через вебпошук");
+      }
+
+      if (isError) {
+        lines.push("• Зв'язок із сервером перервався або повернув помилку");
+      } else if (!replyText || /порожня відповідь/i.test(replyText)) {
+        lines.push("• Моделі не дали текст, використав резервний варіант");
+      } else {
+        lines.push("• Підготував відповідь у чаті");
+      }
+      return lines.join("\n");
     }
 
     function extractPhotoUrl(item) {
@@ -709,6 +774,7 @@
         }, 1400);
       }
     }
+
     function renderBookFractions(containerEl) {
       if (!containerEl) return;
 
@@ -793,7 +859,6 @@
         }
       }
     }
-
     function updateAttachmentUi() {
       if (pendingImageBase64) {
         attachmentThumb.src = pendingImageBase64;
@@ -1065,6 +1130,30 @@
           bubble.appendChild(meta);
         }
 
+        const isThinkingPlaceholder = msg.role === "assistant" && msg.text === "Думаю...";
+        if (msg.role === "assistant" && !isThinkingPlaceholder && msg.thoughts) {
+          const tWrap = document.createElement("div");
+          tWrap.className = "thoughts-wrap";
+
+          const tBtn = document.createElement("button");
+          tBtn.type = "button";
+          tBtn.className = "thoughts-toggle";
+          tBtn.innerHTML = "<span>🧠 Думки Васі</span><span>▾</span>";
+
+          const tPanel = document.createElement("div");
+          tPanel.className = "thoughts-panel";
+          tPanel.textContent = msg.thoughts;
+
+          tBtn.addEventListener("click", () => {
+            const open = tWrap.classList.toggle("open");
+            tBtn.lastElementChild.textContent = open ? "▴" : "▾";
+          });
+
+          tWrap.appendChild(tBtn);
+          tWrap.appendChild(tPanel);
+          bubble.appendChild(tWrap);
+        }
+
         if (msg.image) {
           const img = document.createElement("img");
           img.src = msg.image;
@@ -1102,7 +1191,6 @@
           }
         }
 
-        const isThinkingPlaceholder = msg.role === "assistant" && msg.text === "Думаю...";
         if (msg.role === "assistant" && !isThinkingPlaceholder) {
           const disclaimer = document.createElement("div");
           disclaimer.className = "ai-disclaimer";
@@ -1195,7 +1283,7 @@
         image: imageToSend || null
       });
 
-      const thinkingMsg = { role: "assistant", text: "Думаю...", photos: [], feedback: null };
+      const thinkingMsg = { role: "assistant", text: "Думаю...", photos: [], thoughts: "", feedback: null };
       activeChat.messages.push(thinkingMsg);
       saveState();
       renderAll();
@@ -1224,8 +1312,22 @@
           })
         });
         const data = await res.json();
-        thinkingMsg.text = data.reply || data.response || data.error || "Порожня відповідь від сервера.";
-        thinkingMsg.photos = Array.isArray(data.photos) ? data.photos : [];
+        const replyText = data.reply || data.response || data.error || "Порожня відповідь від сервера.";
+        const replyPhotos = Array.isArray(data.photos) ? data.photos : [];
+
+        thinkingMsg.text = replyText;
+        thinkingMsg.photos = replyPhotos;
+        thinkingMsg.thoughts =
+          typeof data.thoughts === "string" && data.thoughts.trim()
+            ? data.thoughts.trim()
+            : buildThoughtsTrace({
+                userText: text,
+                replyText,
+                photos: replyPhotos,
+                effectiveMode,
+                hadImage: Boolean(imageToSend),
+                isError: !res.ok && !replyPhotos.length
+              });
 
         if (typeof data.used === "number" && typeof data.limit === "number") {
           state.usage = {
@@ -1237,6 +1339,14 @@
       } catch {
         thinkingMsg.text = "Не вдалося з'єднатися з сервером.";
         thinkingMsg.photos = [];
+        thinkingMsg.thoughts = buildThoughtsTrace({
+          userText: text,
+          replyText: "",
+          photos: [],
+          effectiveMode,
+          hadImage: Boolean(imageToSend),
+          isError: true
+        });
       }
 
       saveState();
@@ -1247,4 +1357,3 @@
   </script>
 </body>
 </html>
-  

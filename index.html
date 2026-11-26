@@ -520,7 +520,7 @@
       cursor: pointer;
     }
   </style>
-  </head>
+</head>
 <body>
   <header class="top-bar">
     <button id="openSidebarBtn" class="icon-btn" type="button" aria-label="Відкрити чати">☰</button>
@@ -735,11 +735,28 @@
     }
 
     function cleanForSpeech(rawText) {
-      return String(rawText || "")
-        .replace(/```[\s\S]*?```/g, " блок коду ")
-        .replace(/[*_`~#<>|]/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
+      let s = String(rawText || "")
+        .replace(/```[\s\S]*?```/g, " далі йде блок коду ")
+        .replace(/`[^`]+`/g, " ")
+        .replace(/\[PHOTO:[^\]]*\]/gi, " ");
+
+      s = s
+        .replace(/(\d+)\s*\/\s*(\d+)/g, "$1 на $2")
+        .replace(/(\d+(?:[.,]\d+)?)\s*%/g, "$1 відсотків")
+        .replace(/\s*=\s*/g, " дорівнює ")
+        .replace(/\s*[×*·]\s*/g, " помножити на ")
+        .replace(/\s*÷\s*/g, " поділити на ")
+        .replace(/\s*\+\s*/g, " плюс ")
+        .replace(/\s*-\s*/g, " мінус ")
+        .replace(/[()[\]{}<>|~#_*\\]/g, " ");
+
+      s = s.replace(/(?:\b\d+(?:[.,]\d+)?\b[\s,;:]*){6,}/g, (match) => {
+        const nums = match.match(/\b\d+(?:[.,]\d+)?\b/g) || [];
+        const head = nums.slice(0, 3).join(", ");
+        return `${head} та інші числа `;
+      });
+
+      return s.replace(/\s+/g, " ").trim();
     }
 
     function pickUkrainianVoice() {
@@ -1495,3 +1512,4 @@
   </script>
 </body>
 </html>
+  

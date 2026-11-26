@@ -201,14 +201,11 @@ def call_openrouter(
     messages: list[dict],
     models: list[str],
     api_keys: list[str],
-    trace: list[str] | None = None,
-) -> tuple[str | None, str, str]:
+) -> tuple[str | None, str]:
     global KEY_CURSOR
 
     if not api_keys:
-        if trace is not None:
-            trace.append("Не знайдено жодного API-ключа OpenRouter")
-        return None, "", ""
+        return None, ""
 
     headers_base = {
         "Content-Type": "application/json",
@@ -235,11 +232,8 @@ def call_openrouter(
                 timeout=11,
             )
 
-            # Якщо на поточному ключі ліміт (429), робимо ще 1 швидку спробу іншим ключем
             if resp.status_code == 429 and keys_count > 1:
                 alt_slot = (key_slot + 1) % keys_count
-                if trace is not None:
-                    trace.append(f"Ключ #{key_slot + 1} обмежений (429), пробую ключ #{alt_slot + 1} для {model_name}")
                 resp = requests.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
@@ -255,15 +249,11 @@ def call_openrouter(
 
             if resp.status_code != 200:
                 print(f"[OpenRouter] {model_name} status={resp.status_code}")
-                if trace is not None:
-                    trace.append(f"Модель {model_name} повернула статус {resp.status_code} — йду далі")
                 continue
 
             payload = resp.json()
             choices = payload.get("choices") or []
             if not choices:
-                if trace is not None:
-                    trace.append(f"Модель {model_name} не повернула варіантів відповіді")
                 continue
 
             msg_obj = choices[0].get("message") or {}
@@ -280,31 +270,16 @@ def call_openrouter(
             else:
                 raw_text = ""
 
-            cleaned_text, tag_reasoning = _extract_reasoning_from_text(raw_text)
-            field_reasoning = msg_obj.get("reasoning")
-            if not isinstance(field_reasoning, str):
-                field_reasoning = (
-                    msg_obj.get("reasoning_content")
-                    if isinstance(msg_obj.get("reasoning_content"), str)
-                    else ""
-                )
-            reasoning_text = (field_reasoning or tag_reasoning or "").strip()
+            cleaned_text, _ = _extract_reasoning_from_text(raw_text)
 
             if cleaned_text:
                 KEY_CURSOR = (key_slot + 1) % keys_count
-                if trace is not None:
-                    trace.append(f"Відповідь отримано від {model_name}")
-                return cleaned_text, model_name, reasoning_text
-
-            if trace is not None:
-                trace.append(f"Модель {model_name} віддала порожній текст — пробую наступну")
+                return cleaned_text, model_name
         except Exception as exc:
             print(f"[OpenRouter] {model_name} error={exc}")
-            if trace is not None:
-                trace.append(f"Модель {model_name} не встигла відповісти за 11с — перемикаю")
             continue
 
-    return None, "", ""
+    return None, ""
 
 
 def _extract_fallback_photo_query(user_text: str) -> str:
@@ -389,7 +364,7 @@ def chat_endpoint():
     trace: list[str] = [f"• Режим: {model_mode} • Оцінка: {size_tier} ({cost} од.)"]
     has_image = bool(image_data)
     if has_image:
-        trace.append("• Прикріплено фото — підключаю візуальні моделі")
+        trace.append("• Розглядаю прикріплене фото")
 
     search_ctx = ""
     if user_text and needs_web_search(user_text):
@@ -419,17 +394,16 @@ def chat_endpoint():
     })
 
     models_to_try = get_candidate_models(model_mode, has_image=has_image)
-    reply, used_model, model_reasoning = call_openrouter(
+    reply, _ = call_openrouter(
         messages=messages,
         models=models_to_try,
         api_keys=api_keys,
-        trace=trace,
     )
 
     if not reply:
         fallback_q = _extract_fallback_photo_query(user_text)
         if fallback_q:
-            trace.append(f"• Моделі не дали тексту — шукаю фото на Pixabay: «{fallback_q}»")
+            trace.append(f"• Шукаю фото на Pixabay: «{fallback_q}»")
             fallback_photo = search_pixabay_photo(fallback_q)
             if fallback_photo:
                 trace.append("• Фото на Pixabay знайдено")
@@ -447,9 +421,9 @@ def chat_endpoint():
                 })
             trace.append("• На Pixabay фото за цим запитом не знайдено")
 
-        trace.append("• Жодна модель не повернула коректну відповідь")
+        trace.append("• Не вдалося сформувати відповідь з першої спроби")
         return jsonify({
-            "reply": "На жаль, зараз жодна модель не змогла відповісти. Спробуй ще раз.",
+            "reply": "На жаль, зараз не вдалося відповісти. Спробуй ще раз.",
             "photos": [],
             "thoughts": "\n".join(trace),
             "size_tier": size_tier,
@@ -467,8 +441,7 @@ def chat_endpoint():
     if photos and (not reply or "порожня відповідь від сервера" in reply.lower()):
         reply = "Тримай фото за твоїм запитом!"
 
-    if model_reasoning:
-        trace.append(f"• Міркування ({used_model}):\n{model_reasoning[:1200]}")
+    trace.append("• Розібрався із запитом і підготував відповідь")
 
     bucket["used"] += cost
     new_remaining = max(0, bucket["limit"] - bucket["used"])
@@ -483,4 +456,3 @@ def chat_endpoint():
         "limit": bucket["limit"],
         "remaining": new_remaining,
     })
-    

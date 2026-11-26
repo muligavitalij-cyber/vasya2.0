@@ -8,7 +8,7 @@ import urllib.request
 
 _PHOTO_CACHE: dict[str, tuple[float, dict | None]] = {}
 _CACHE_TTL_SECONDS = 86400  # 24 години
-_PHOTO_MARKER_RE = re.compile(r"\[PHOTO:\s*([^\[\]]+?)\]", re.IGNORECASE)
+_PHOTO_MARKER_RE = re.compile(r"\[?PHOTO:\s*([^\[\]\r\n]+?)\]?", re.IGNORECASE)
 
 
 def _normalize_query(query: str) -> str:
@@ -78,7 +78,7 @@ def search_pixabay_photo(query: str, per_page: int = 5) -> dict | None:
 
 def process_photo_markers(text: str, max_photos: int = 2) -> tuple[str, list[dict]]:
     """
-    Знаходить маркери [PHOTO: ...] у тексті, підтягує фото через Pixabay,
+    Знаходить маркери PHOTO (навіть без частини дужок), підтягує фото через Pixabay,
     прибирає маркери з тексту і повертає (очищений_текст, список_фото).
     """
     if not text:
@@ -105,4 +105,4 @@ def process_photo_markers(text: str, max_photos: int = 2) -> tuple[str, list[dic
     cleaned_text = re.sub(r"[ \t]{2,}", " ", cleaned_text)
     cleaned_text = re.sub(r"\n{3,}", "\n\n", cleaned_text).strip()
     return cleaned_text, photos
-        
+    

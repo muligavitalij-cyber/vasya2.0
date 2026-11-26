@@ -482,7 +482,7 @@
     }
   </style>
   </head>
-<body>
+  <body>
   <header class="top-bar">
     <button id="openSidebarBtn" class="icon-btn" type="button" aria-label="Відкрити чати">☰</button>
     <select id="modelSelect" class="model-select" aria-label="Вибір режиму або моделі">
@@ -859,7 +859,7 @@
         }
       }
     }
-    function updateAttachmentUi() {
+      function updateAttachmentUi() {
       if (pendingImageBase64) {
         attachmentThumb.src = pendingImageBase64;
         attachmentBar.classList.add("active");
@@ -1110,6 +1110,34 @@
       if (!activeChat) return;
 
       activeChat.messages.forEach((msg, idx) => {
+        const isThinkingPlaceholder = msg.role === "assistant" && msg.text === "Думаю...";
+
+        if (msg.role === "assistant" && !isThinkingPlaceholder && msg.thoughts) {
+          const tWrap = document.createElement("div");
+          tWrap.className = "thoughts-wrap";
+          tWrap.style.maxWidth = "92%";
+          tWrap.style.alignSelf = "flex-start";
+          tWrap.style.margin = "0 0 -4px 0";
+
+          const tBtn = document.createElement("button");
+          tBtn.type = "button";
+          tBtn.className = "thoughts-toggle";
+          tBtn.innerHTML = "<span>🧠 Думки Васі</span><span>▾</span>";
+
+          const tPanel = document.createElement("div");
+          tPanel.className = "thoughts-panel";
+          tPanel.textContent = msg.thoughts;
+
+          tBtn.addEventListener("click", () => {
+            const open = tWrap.classList.toggle("open");
+            tBtn.lastElementChild.textContent = open ? "▴" : "▾";
+          });
+
+          tWrap.appendChild(tBtn);
+          tWrap.appendChild(tPanel);
+          messagesEl.appendChild(tWrap);
+        }
+
         const bubble = document.createElement("div");
         bubble.className = "msg " + msg.role;
 
@@ -1128,30 +1156,6 @@
           meta.appendChild(speakingBadge);
 
           bubble.appendChild(meta);
-        }
-
-        const isThinkingPlaceholder = msg.role === "assistant" && msg.text === "Думаю...";
-        if (msg.role === "assistant" && !isThinkingPlaceholder && msg.thoughts) {
-          const tWrap = document.createElement("div");
-          tWrap.className = "thoughts-wrap";
-
-          const tBtn = document.createElement("button");
-          tBtn.type = "button";
-          tBtn.className = "thoughts-toggle";
-          tBtn.innerHTML = "<span>🧠 Думки Васі</span><span>▾</span>";
-
-          const tPanel = document.createElement("div");
-          tPanel.className = "thoughts-panel";
-          tPanel.textContent = msg.thoughts;
-
-          tBtn.addEventListener("click", () => {
-            const open = tWrap.classList.toggle("open");
-            tBtn.lastElementChild.textContent = open ? "▴" : "▾";
-          });
-
-          tWrap.appendChild(tBtn);
-          tWrap.appendChild(tPanel);
-          bubble.appendChild(tWrap);
         }
 
         if (msg.image) {
@@ -1357,3 +1361,4 @@
   </script>
 </body>
 </html>
+  

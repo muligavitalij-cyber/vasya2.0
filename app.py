@@ -1,8 +1,9 @@
 import os
+import re
 import time
 import requests
 from flask import Flask, jsonify, request, send_from_directory
-from pixabay_photo import process_photo_markers
+from pixabay_photo import process_photo_markers, search_pixabay_photo
 from prompt_builder import build_system_prompt, clean_display_text
 from web_search import needs_web_search, web_search
 
@@ -207,9 +208,10 @@ def call_openrouter(messages: list[dict], models: list[str], api_keys: list[str]
                         "model": model_name,
                         "messages": messages,
                     },
-                    timeout=12,
+                    timeout=22,
                 )
                 if resp.status_code != 200:
+                    print(f"[OpenRouter] {model_name} status={resp.status_code}")
                     continue
                 payload = resp.json()
                 choices = payload.get("choices") or []
@@ -227,9 +229,49 @@ def call_openrouter(messages: list[dict], models: list[str], api_keys: list[str]
                     content = content.strip()
                 if content:
                     return content
-            except Exception:
+            except Exception as exc:
+                print(f"[OpenRouter] {model_name} error={exc}")
                 continue
     return None
+
+
+def _extract_fallback_photo_query(user_text: str) -> str:
+    lower = (user_text or "").lower().strip()
+    if not lower:
+        return ""
+    if not any(word in lower for word in ("фото", "картинк", "зображен", "покаж", "скин", "photo", "image")):
+        return ""
+
+    quick_map = {
+        "тигр": "tiger",
+        "кота": "cute cat",
+        "кіт": "cute cat",
+        "кішка": "cute cat",
+        "собаки": "happy dog",
+        "собака": "happy dog",
+        "пес": "happy dog",
+        "жаби": "green frog",
+        "жаба": "green frog",
+        "людини": "person portrait",
+        "людина": "person portrait",
+        "вовка": "wolf",
+        "вовк": "wolf",
+        "ведмедя": "bear",
+        "ведмідь": "bear",
+        "лисиці": "fox",
+        "лисиця": "fox",
+        "машини": "car",
+        "машина": "car",
+        "авто": "car",
+    }
+    for uk_key, en_val in quick_map.items():
+        if re.search(rf"\b{re.escape(uk_key)}\b", lower):
+            return en_val
+
+    cleaned = re.sub(r"\b(скинь|покажи|дай|знайди|фото|картинку|зображення|мені|будь ласка)\b", "", lower)
+    cleaned = re.sub(r"[^a-zа-яіїєґ0-9\s-]", " ", cleaned)
+    cleaned = " ".join(cleaned.split()).strip()
+    return cleaned[:60]
 
 
 @app.post("/api/chat")
@@ -294,6 +336,21 @@ def chat_endpoint():
     reply = call_openrouter(messages=messages, models=models_to_try, api_keys=api_keys)
 
     if not reply:
+        fallback_q = _extract_fallback_photo_query(user_text)
+        fallback_photo = search_pixabay_photo(fallback_q) if fallback_q else None
+        if fallback_photo:
+            bucket["used"] += cost
+            new_remaining = max(0, bucket["limit"] - bucket["used"])
+            return jsonify({
+                "reply": "Моделі зараз перевантажені, але я підтягнув фото напряму:",
+                "photos": [fallback_photo],
+                "size_tier": size_tier,
+                "cost": cost,
+                "used": bucket["used"],
+                "limit": bucket["limit"],
+                "remaining": new_remaining,
+            })
+
         return jsonify({
             "reply": "На жаль, зараз жодна модель не змогла відповісти. Спробуй ще раз.",
             "photos": [],
@@ -318,3 +375,4 @@ def chat_endpoint():
         "limit": bucket["limit"],
         "remaining": new_remaining,
     })
+    

@@ -8,12 +8,31 @@ import urllib.request
 
 _PHOTO_CACHE: dict[str, tuple[float, dict | None]] = {}
 _CACHE_TTL_SECONDS = 86400  # 24 години
-_PHOTO_MARKER_RE = re.compile(r"\[?PHOTO:\s*([^\[\]\r\n]+?)\]?", re.IGNORECASE)
+_FULL_PHOTO_MARKER_RE = re.compile(
+    r"(?m)^[ \t]*\[?PHOTO:\s*([^\[\]\r\n]+?)\]?\s*$|\[PHOTO:\s*([^\[\]\r\n]+?)\]",
+    re.IGNORECASE,
+)
+_BROKEN_TAIL_RE = re.compile(
+    r"(?m)^[ \t]*[A-Za-zА-Яа-яІіЇїЄєҐґ][A-Za-zА-Яа-яІіЇїЄєҐґ0-9 _-]{1,60}\][ \t]*$"
+)
 
 
 def _normalize_query(query: str) -> str:
     cleaned = " ".join((query or "").strip().split())
     return cleaned[:100]
+
+
+def _is_valid_pixabay_query(query: str) -> bool:
+    q = _normalize_query(query)
+    if len(q) < 2:
+        return False
+    if "]" in q or "[" in q:
+        return False
+    # Відсікаємо явно обрізані слова на кшталт "eautiful", "og", "uman"
+    words = q.split()
+    if len(words) == 1 and len(words[0]) <= 4:
+        return False
+    return True
 
 
 def search_pixabay_photo(query: str, per_page: int = 5) -> dict | None:
@@ -26,7 +45,7 @@ def search_pixabay_photo(query: str, per_page: int = 5) -> dict | None:
         return None
 
     q = _normalize_query(query)
-    if not q:
+    if not _is_valid_pixabay_query(q):
         return None
 
     cache_key = f"{q.lower()}::{per_page}"
@@ -78,8 +97,8 @@ def search_pixabay_photo(query: str, per_page: int = 5) -> dict | None:
 
 def process_photo_markers(text: str, max_photos: int = 2) -> tuple[str, list[dict]]:
     """
-    Знаходить маркери PHOTO (навіть без частини дужок), підтягує фото через Pixabay,
-    прибирає маркери з тексту і повертає (очищений_текст, список_фото).
+    Знаходить маркери фото, підтягує фото через Pixabay, чистить самі маркери
+    та можливі обрізані хвости з закриваючою дужкою ']' і повертає (очищений_текст, список_фото).
     """
     if not text:
         return text, []
@@ -88,7 +107,8 @@ def process_photo_markers(text: str, max_photos: int = 2) -> tuple[str, list[dic
     seen_urls: set[str] = set()
 
     def _replace(match: re.Match) -> str:
-        query = (match.group(1) or "").strip()
+        raw_query = match.group(1) if match.group(1) is not None else match.group(2)
+        query = _normalize_query(raw_query or "")
         if not query or len(photos) >= max_photos:
             return ""
         found = search_pixabay_photo(query)
@@ -101,7 +121,8 @@ def process_photo_markers(text: str, max_photos: int = 2) -> tuple[str, list[dic
         photos.append(found)
         return ""
 
-    cleaned_text = _PHOTO_MARKER_RE.sub(_replace, text)
+    cleaned_text = _FULL_PHOTO_MARKER_RE.sub(_replace, text)
+    cleaned_text = _BROKEN_TAIL_RE.sub("", cleaned_text)
     cleaned_text = re.sub(r"[ \t]{2,}", " ", cleaned_text)
     cleaned_text = re.sub(r"\n{3,}", "\n\n", cleaned_text).strip()
     return cleaned_text, photos

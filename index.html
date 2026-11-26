@@ -309,6 +309,19 @@
       margin-bottom: 6px;
       border: 1px solid #e5e7eb;
     }
+    .msg.assistant .reply-photos {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .msg.assistant .reply-photos img {
+      max-width: 100%;
+      width: 100%;
+      max-height: 280px;
+      object-fit: cover;
+      margin-bottom: 0;
+    }
 
     .ai-disclaimer {
       margin-top: 8px;
@@ -435,8 +448,8 @@
       cursor: pointer;
     }
   </style>
-  </head>
-  <body>
+</head>
+<body>
   <header class="top-bar">
     <button id="openSidebarBtn" class="icon-btn" type="button" aria-label="Відкрити чати">☰</button>
     <select id="modelSelect" class="model-select" aria-label="Вибір режиму або моделі">
@@ -542,6 +555,7 @@
               {
                 role: "assistant",
                 text: "Привіт! Я Вася AI 2.1.70. Додав режим **Навчання / ДЗ**, голосовий ввід мікрофоном і акуратнішу роботу з фото задач.",
+                photos: [],
                 feedback: null
               }
             ]
@@ -574,6 +588,17 @@
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       } catch {}
+    }
+
+    function extractPhotoUrl(item) {
+      if (!item) return "";
+      if (typeof item === "string") return item.trim();
+      if (typeof item === "object") {
+        return String(
+          item.image_url || item.url || item.webformatURL || item.largeImageURL || item.previewURL || ""
+        ).trim();
+      }
+      return "";
     }
 
     function stopSpeech(shouldRender = true) {
@@ -1060,6 +1085,23 @@
           }
         }
 
+        if (msg.role === "assistant" && Array.isArray(msg.photos) && msg.photos.length > 0) {
+          const photosWrap = document.createElement("div");
+          photosWrap.className = "reply-photos";
+          for (const item of msg.photos) {
+            const url = extractPhotoUrl(item);
+            if (!url) continue;
+            const pImg = document.createElement("img");
+            pImg.src = url;
+            pImg.alt = (typeof item === "object" && item && (item.alt || item.query)) || "Фото з Pixabay";
+            pImg.loading = "lazy";
+            photosWrap.appendChild(pImg);
+          }
+          if (photosWrap.childElementCount > 0) {
+            bubble.appendChild(photosWrap);
+          }
+        }
+
         const isThinkingPlaceholder = msg.role === "assistant" && msg.text === "Думаю...";
         if (msg.role === "assistant" && !isThinkingPlaceholder) {
           const disclaimer = document.createElement("div");
@@ -1153,7 +1195,7 @@
         image: imageToSend || null
       });
 
-      const thinkingMsg = { role: "assistant", text: "Думаю...", feedback: null };
+      const thinkingMsg = { role: "assistant", text: "Думаю...", photos: [], feedback: null };
       activeChat.messages.push(thinkingMsg);
       saveState();
       renderAll();
@@ -1183,6 +1225,7 @@
         });
         const data = await res.json();
         thinkingMsg.text = data.reply || data.response || data.error || "Порожня відповідь від сервера.";
+        thinkingMsg.photos = Array.isArray(data.photos) ? data.photos : [];
 
         if (typeof data.used === "number" && typeof data.limit === "number") {
           state.usage = {
@@ -1193,6 +1236,7 @@
         }
       } catch {
         thinkingMsg.text = "Не вдалося з'єднатися з сервером.";
+        thinkingMsg.photos = [];
       }
 
       saveState();

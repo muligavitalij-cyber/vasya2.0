@@ -520,7 +520,7 @@
       cursor: pointer;
     }
   </style>
-</head>
+  </head>
 <body>
   <header class="top-bar">
     <button id="openSidebarBtn" class="icon-btn" type="button" aria-label="Відкрити чати">☰</button>
@@ -603,6 +603,9 @@
     let state = loadState();
     let pendingImageBase64 = null;
     let speakingIndex = null;
+    let activeAudioEl = null;
+    let activeAudioUrl = null;
+    let speechSessionId = 0;
 
     function todayUtc() {
       return new Date().toISOString().slice(0, 10);
@@ -626,9 +629,9 @@
             messages: [
               {
                 role: "assistant",
-                text: "Привіт! Я Вася AI 2.1.70. Додав режим **Навчання / ДЗ**, голосовий ввід мікрофоном і акуратнішу роботу з фото задач.",
+                text: "Привіт! Я Вася AI 2.1.70. Додав режим **Навчання / ДЗ**, голосовий ввід мікрофоном, живіше озвучування і акуратнішу роботу з фото задач.",
                 photos: [],
-                thoughts: "Готовий приймати запити, фото та голос.",
+                thoughts: "• Готовий приймати запити, фото та голос.",
                 feedback: null
               }
             ]
@@ -667,7 +670,7 @@
       const lines = [];
       lines.push(`• Режим роботи: ${effectiveMode || "auto"}`);
       if (hadImage) {
-        lines.push("• Підключив розпізнавання прикріпленого фото");
+        lines.push("• Розглядаю прикріплене фото");
       }
       const lower = String(userText || "").toLowerCase();
       const photoList = Array.isArray(photos) ? photos : [];
@@ -675,8 +678,8 @@
       if (/фото|картинк|зображен|покаж|скин|photo|image/i.test(lower) || photoList.length > 0) {
         lines.push(
           photoList.length > 0
-            ? `• Пошук фото: Pixabay — знайшов (${photoList.length})`
-            : "• Пошук фото: Pixabay — підходящого фото не знайшлося"
+            ? `• Підтягнуто фото з Pixabay: ${photoList.length}`
+            : "• Фото за запитом не знайдено"
         );
       }
 
@@ -687,9 +690,9 @@
       if (isError) {
         lines.push("• Зв'язок із сервером перервався або повернув помилку");
       } else if (!replyText || /порожня відповідь/i.test(replyText)) {
-        lines.push("• Моделі не дали текст, використав резервний варіант");
+        lines.push("• Не вдалося сформувати текстову відповідь");
       } else {
-        lines.push("• Підготував відповідь у чаті");
+        lines.push("• Розібрався із запитом і підготував відповідь");
       }
       return lines.join("\n");
     }
@@ -706,6 +709,20 @@
     }
 
     function stopSpeech(shouldRender = true) {
+      speechSessionId += 1;
+      if (activeAudioEl) {
+        try {
+          activeAudioEl.pause();
+          activeAudioEl.currentTime = 0;
+        } catch {}
+        activeAudioEl = null;
+      }
+      if (activeAudioUrl) {
+        try {
+          URL.revokeObjectURL(activeAudioUrl);
+        } catch {}
+        activeAudioUrl = null;
+      }
       if ("speechSynthesis" in window) {
         try {
           window.speechSynthesis.cancel();
@@ -735,12 +752,46 @@
       );
     }
 
-    function toggleSpeakMessage(msgIndex, text) {
-      if (!("speechSynthesis" in window)) {
-        alert("Цей браузер не підтримує озвучування.");
+    function speakFallbackBrowser(cleaned, msgIndex, sessionId) {
+      if (!("speechSynthesis" in window) || sessionId !== speechSessionId) {
+        if (sessionId === speechSessionId) {
+          speakingIndex = null;
+          renderMessages();
+        }
         return;
       }
 
+      const utterance = new SpeechSynthesisUtterance(cleaned);
+      utterance.lang = "uk-UA";
+      const uaVoice = pickUkrainianVoice();
+      if (uaVoice) {
+        utterance.voice = uaVoice;
+      }
+
+      utterance.onend = () => {
+        if (sessionId === speechSessionId && speakingIndex === msgIndex) {
+          speakingIndex = null;
+          renderMessages();
+        }
+      };
+      utterance.onerror = () => {
+        if (sessionId === speechSessionId && speakingIndex === msgIndex) {
+          speakingIndex = null;
+          renderMessages();
+        }
+      };
+
+      try {
+        window.speechSynthesis.speak(utterance);
+      } catch {
+        if (sessionId === speechSessionId) {
+          speakingIndex = null;
+          renderMessages();
+        }
+      }
+    }
+
+    async function toggleSpeakMessage(msgIndex, text) {
       const wasSpeakingThis = speakingIndex === msgIndex;
       stopSpeech(false);
 
@@ -755,34 +806,59 @@
         return;
       }
 
-      const utterance = new SpeechSynthesisUtterance(cleaned);
-      utterance.lang = "uk-UA";
-      const uaVoice = pickUkrainianVoice();
-      if (uaVoice) {
-        utterance.voice = uaVoice;
-      }
-
+      const sessionId = speechSessionId;
       speakingIndex = msgIndex;
       renderMessages();
 
-      utterance.onend = () => {
-        if (speakingIndex === msgIndex) {
-          speakingIndex = null;
-          renderMessages();
-        }
-      };
-      utterance.onerror = () => {
-        if (speakingIndex === msgIndex) {
-          speakingIndex = null;
-          renderMessages();
-        }
-      };
-
       try {
-        window.speechSynthesis.speak(utterance);
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: cleaned,
+            voice: "uk-UA-OstapNeural"
+          })
+        });
+
+        if (sessionId !== speechSessionId) return;
+
+        if (!res.ok) {
+          speakFallbackBrowser(cleaned, msgIndex, sessionId);
+          return;
+        }
+
+        const blob = await res.blob();
+        if (sessionId !== speechSessionId) return;
+
+        if (!blob || blob.size === 0) {
+          speakFallbackBrowser(cleaned, msgIndex, sessionId);
+          return;
+        }
+
+        const audioUrl = URL.createObjectURL(blob);
+        const audio = new Audio(audioUrl);
+        activeAudioEl = audio;
+        activeAudioUrl = audioUrl;
+
+        audio.onended = () => {
+          if (sessionId === speechSessionId) {
+            stopSpeech(true);
+          }
+        };
+        audio.onerror = () => {
+          if (sessionId === speechSessionId) {
+            stopSpeech(false);
+            speakingIndex = msgIndex;
+            renderMessages();
+            speakFallbackBrowser(cleaned, msgIndex, sessionId);
+          }
+        };
+
+        await audio.play();
       } catch {
-        speakingIndex = null;
-        renderMessages();
+        if (sessionId === speechSessionId) {
+          speakFallbackBrowser(cleaned, msgIndex, sessionId);
+        }
       }
     }
 
@@ -835,7 +911,7 @@
         textNodes.push(walker.currentNode);
       }
 
-      const fracRegex = /(^|[\s(=+\-×·÷≈<>])(\d{1,4})\s*\/\s*(\d{1,4})(?=[\s)=+\-×·÷≈<>.,;!?]|$)/g;
+      const fracRegex = /(^|[\s(=+\-×·÷≈<>[(])(\d{1,4})\s*\/\s*(\d{1,4})(?=[\s)=+\-×·÷≈<>.,;!?\]):]|$)/g;
 
       for (const node of textNodes) {
         const text = node.nodeValue;
@@ -1419,4 +1495,3 @@
   </script>
 </body>
 </html>
-  

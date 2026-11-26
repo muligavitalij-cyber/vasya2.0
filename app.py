@@ -9,7 +9,6 @@ from web_search import needs_web_search, web_search
 
 app = Flask(__name__)
 
-# Базовий денний ліміт і надбавка за кожен додатковий активний ключ
 BASE_DAILY_LIMIT = 250
 BONUS_PER_EXTRA_KEY = 0
 
@@ -82,7 +81,6 @@ VISION_MODELS = [
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 ]
 
-# Простий серверний кеш лімітів (скидається при рестарті інстансу на Vercel до підключення постійної БД)
 USAGE_STORE: dict[str, dict] = {}
 
 
@@ -186,7 +184,24 @@ def build_user_content(text: str, image_data: str | None):
     return text
 
 
-def call_openrouter(messages: list[dict], models: list[str], api_keys: list[str]) -> str | None:
+def _extract_reasoning_from_text(raw: str) -> tuple[str, str]:
+    if not raw:
+        return "", ""
+    reasons = []
+    for match in re.finditer(r"<think>([\s\S]*?)</think>", raw, flags=re.IGNORECASE):
+        chunk = (match.group(1) or "").strip()
+        if chunk:
+            reasons.append(chunk)
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", raw, flags=re.IGNORECASE).strip()
+    return cleaned, "\n\n".join(reasons).strip()
+
+
+def call_openrouter(
+    messages: list[dict],
+    models: list[str],
+    api_keys: list[str],
+    trace: list[str] | None = None,
+) -> tuple[str | None, str, str]:
     headers_base = {
         "Content-Type": "application/json",
         "HTTP-Referer": "https://vasya2-0.vercel.app",
@@ -194,7 +209,7 @@ def call_openrouter(messages: list[dict], models: list[str], api_keys: list[str]
     }
 
     for model_name in models:
-        for api_key in api_keys:
+        for idx, api_key in enumerate(api_keys, start=1):
             if not api_key:
                 continue
             try:
@@ -212,27 +227,51 @@ def call_openrouter(messages: list[dict], models: list[str], api_keys: list[str]
                 )
                 if resp.status_code != 200:
                     print(f"[OpenRouter] {model_name} status={resp.status_code}")
+                    if trace is not None:
+                        trace.append(f"Модель {model_name} (ключ #{idx}) повернула статус {resp.status_code}")
                     continue
+
                 payload = resp.json()
                 choices = payload.get("choices") or []
                 if not choices:
+                    if trace is not None:
+                        trace.append(f"Модель {model_name} не повернула варіантів відповіді")
                     continue
-                content = (choices[0].get("message") or {}).get("content")
-                if isinstance(content, list):
+
+                msg_obj = choices[0].get("message") or {}
+                raw_content = msg_obj.get("content")
+                if isinstance(raw_content, list):
                     text_parts = [
                         part.get("text", "")
-                        for part in content
+                        for part in raw_content
                         if isinstance(part, dict) and part.get("type") == "text"
                     ]
-                    content = "".join(text_parts).strip()
-                elif isinstance(content, str):
-                    content = content.strip()
-                if content:
-                    return content
+                    raw_text = "".join(text_parts).strip()
+                elif isinstance(raw_content, str):
+                    raw_text = raw_content.strip()
+                else:
+                    raw_text = ""
+
+                cleaned_text, tag_reasoning = _extract_reasoning_from_text(raw_text)
+                field_reasoning = msg_obj.get("reasoning")
+                if not isinstance(field_reasoning, str):
+                    field_reasoning = msg_obj.get("reasoning_content") if isinstance(msg_obj.get("reasoning_content"), str) else ""
+                reasoning_text = (field_reasoning or tag_reasoning or "").strip()
+
+                if cleaned_text:
+                    if trace is not None:
+                        trace.append(f"Відповідь отримано від моделі {model_name}")
+                    return cleaned_text, model_name, reasoning_text
+
+                if trace is not None:
+                    trace.append(f"Модель {model_name} повернула порожній текст")
             except Exception as exc:
                 print(f"[OpenRouter] {model_name} error={exc}")
+                if trace is not None:
+                    trace.append(f"Модель {model_name} не відповіла через помилку/таймаут")
                 continue
-    return None
+
+    return None, "", ""
 
 
 def _extract_fallback_photo_query(user_text: str) -> str:
@@ -305,6 +344,7 @@ def chat_endpoint():
                 f"а залишилось {remaining} з {bucket['limit']} од."
             ),
             "photos": [],
+            "thoughts": [f"Ліміт вичерпано: потрібно {cost} од., залишилось {remaining} од."],
             "limit_exceeded": True,
             "size_tier": size_tier,
             "cost": cost,
@@ -313,8 +353,17 @@ def chat_endpoint():
             "remaining": remaining,
         }), 429
 
+    trace: list[str] = [f"Режим: {model_mode} • Оцінка: {size_tier} ({cost} од.)"]
     has_image = bool(image_data)
-    search_ctx = web_search(user_text) if (user_text and needs_web_search(user_text)) else ""
+    if has_image:
+        trace.append("До запиту прикріплено фото — підключаю візуальні моделі")
+
+    search_ctx = ""
+    if user_text and needs_web_search(user_text):
+        trace.append(f"Шукаю свіжу інформацію в інтернеті за запитом: «{user_text[:80]}»")
+        search_ctx = web_search(user_text)
+        trace.append("Дані вебпошуку отримано" if search_ctx else "Вебпошук не дав додаткових результатів")
+
     system_prompt = build_system_prompt(
         search_context=search_ctx,
         mode=model_mode,
@@ -337,27 +386,39 @@ def chat_endpoint():
     })
 
     models_to_try = get_candidate_models(model_mode, has_image=has_image)
-    reply = call_openrouter(messages=messages, models=models_to_try, api_keys=api_keys)
+    reply, used_model, model_reasoning = call_openrouter(
+        messages=messages,
+        models=models_to_try,
+        api_keys=api_keys,
+        trace=trace,
+    )
 
     if not reply:
         fallback_q = _extract_fallback_photo_query(user_text)
-        fallback_photo = search_pixabay_photo(fallback_q) if fallback_q else None
-        if fallback_photo:
-            bucket["used"] += cost
-            new_remaining = max(0, bucket["limit"] - bucket["used"])
-            return jsonify({
-                "reply": "Тримай фото за твоїм запитом:",
-                "photos": [fallback_photo],
-                "size_tier": size_tier,
-                "cost": cost,
-                "used": bucket["used"],
-                "limit": bucket["limit"],
-                "remaining": new_remaining,
-            })
+        if fallback_q:
+            trace.append(f"Моделі не відповіли текстом — шукаю фото на Pixabay за запитом: «{fallback_q}»")
+            fallback_photo = search_pixabay_photo(fallback_q)
+            if fallback_photo:
+                trace.append("Фото на Pixabay знайдено, віддаю швидку відповідь")
+                bucket["used"] += cost
+                new_remaining = max(0, bucket["limit"] - bucket["used"])
+                return jsonify({
+                    "reply": "Тримай фото за твоїм запитом:",
+                    "photos": [fallback_photo],
+                    "thoughts": trace,
+                    "size_tier": size_tier,
+                    "cost": cost,
+                    "used": bucket["used"],
+                    "limit": bucket["limit"],
+                    "remaining": new_remaining,
+                })
+            trace.append("На Pixabay фото за цим запитом не знайдено")
 
+        trace.append("Жодна модель не повернула коректну відповідь")
         return jsonify({
             "reply": "На жаль, зараз жодна модель не змогла відповісти. Спробуй ще раз.",
             "photos": [],
+            "thoughts": trace,
             "size_tier": size_tier,
             "cost": cost,
             "used": bucket["used"],
@@ -366,10 +427,15 @@ def chat_endpoint():
         }), 502
 
     reply, photos = process_photo_markers(reply)
+    if photos:
+        trace.append(f"Оброблено маркерів фото та знайдено зображень: {len(photos)}")
     reply = clean_display_text(reply)
 
     if photos and (not reply or "порожня відповідь від сервера" in reply.lower()):
         reply = "Тримай фото за твоїм запитом!"
+
+    if model_reasoning:
+        trace.append(f"Міркування моделі ({used_model}):\n{model_reasoning[:1200]}")
 
     bucket["used"] += cost
     new_remaining = max(0, bucket["limit"] - bucket["used"])
@@ -377,10 +443,11 @@ def chat_endpoint():
     return jsonify({
         "reply": reply,
         "photos": photos,
+        "thoughts": trace,
         "size_tier": size_tier,
         "cost": cost,
         "used": bucket["used"],
         "limit": bucket["limit"],
         "remaining": new_remaining,
     })
-    
+                      

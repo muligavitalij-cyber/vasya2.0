@@ -2,6 +2,7 @@ import os
 import time
 import requests
 from flask import Flask, jsonify, request, send_from_directory
+from pixabay_photo import process_photo_markers
 from prompt_builder import build_system_prompt, clean_display_text
 from web_search import needs_web_search, web_search
 
@@ -257,6 +258,7 @@ def chat_endpoint():
                 f"Не вистачає ліміту на сьогодні: цей запит оцінено як {size_tier} ({cost} од.), "
                 f"а залишилось {remaining} з {bucket['limit']} од."
             ),
+            "photos": [],
             "limit_exceeded": True,
             "size_tier": size_tier,
             "cost": cost,
@@ -294,6 +296,7 @@ def chat_endpoint():
     if not reply:
         return jsonify({
             "reply": "На жаль, зараз жодна модель не змогла відповісти. Спробуй ще раз.",
+            "photos": [],
             "size_tier": size_tier,
             "cost": cost,
             "used": bucket["used"],
@@ -302,11 +305,13 @@ def chat_endpoint():
         }), 502
 
     reply = clean_display_text(reply)
+    reply, photos = process_photo_markers(reply)
     bucket["used"] += cost
     new_remaining = max(0, bucket["limit"] - bucket["used"])
 
     return jsonify({
         "reply": reply,
+        "photos": photos,
         "size_tier": size_tier,
         "cost": cost,
         "used": bucket["used"],

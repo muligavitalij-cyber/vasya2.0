@@ -304,8 +304,8 @@ def chat_endpoint():
             "remaining": remaining,
         }), 502
 
-    reply = clean_display_text(reply)
     reply, photos = process_photo_markers(reply)
+    reply = clean_display_text(reply)
     bucket["used"] += cost
     new_remaining = max(0, bucket["limit"] - bucket["used"])
 
@@ -318,4 +318,3 @@ def chat_endpoint():
         "limit": bucket["limit"],
         "remaining": new_remaining,
     })
-    

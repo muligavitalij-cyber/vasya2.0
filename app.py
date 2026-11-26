@@ -1,8 +1,11 @@
+import asyncio
+import io
 import os
 import re
 import time
+import edge_tts
 import requests
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
 from pixabay_photo import process_photo_markers, search_pixabay_photo
 from prompt_builder import build_system_prompt, clean_display_text
 from web_search import needs_web_search, web_search
@@ -162,6 +165,39 @@ def limit_status():
         "remaining": remaining,
         "costs": REQUEST_COSTS,
     })
+
+
+@app.post("/api/tts")
+def tts_endpoint():
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    voice = (data.get("voice") or "uk-UA-OstapNeural").strip()
+
+    if voice not in ("uk-UA-OstapNeural", "uk-UA-PolinaNeural"):
+        voice = "uk-UA-OstapNeural"
+
+    if not text:
+        return jsonify({"error": "Немає тексту для озвучування."}), 400
+
+    safe_text = text[:1200]
+
+    async def _synth():
+        communicate = edge_tts.Communicate(safe_text, voice=voice)
+        buf = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk.get("type") == "audio":
+                buf.write(chunk.get("data", b""))
+        buf.seek(0)
+        return buf
+
+    try:
+        audio_buf = asyncio.run(_synth())
+        if audio_buf.getbuffer().nbytes == 0:
+            return jsonify({"error": "Не вдалося згенерувати голос."}), 502
+        return send_file(audio_buf, mimetype="audio/mpeg")
+    except Exception as exc:
+        print(f"[TTS] error={exc}")
+        return jsonify({"error": "Помилка озвучування."}), 500
 
 
 def get_candidate_models(mode: str, has_image: bool = False) -> list[str]:

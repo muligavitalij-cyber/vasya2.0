@@ -3,12 +3,16 @@ import io
 import os
 import re
 import time
-import edge_tts
 import requests
 from flask import Flask, jsonify, request, send_file, send_from_directory
 from pixabay_photo import process_photo_markers, search_pixabay_photo
 from prompt_builder import build_system_prompt, clean_display_text
 from web_search import needs_web_search, web_search
+
+try:
+    import edge_tts
+except Exception:
+    edge_tts = None
 
 app = Flask(__name__)
 
@@ -169,6 +173,9 @@ def limit_status():
 
 @app.post("/api/tts")
 def tts_endpoint():
+    if edge_tts is None:
+        return jsonify({"error": "Серверне озвучування тимчасово недоступне."}), 503
+
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
     voice = (data.get("voice") or "uk-UA-OstapNeural").strip()

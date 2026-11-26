@@ -208,7 +208,7 @@ def call_openrouter(messages: list[dict], models: list[str], api_keys: list[str]
                         "model": model_name,
                         "messages": messages,
                     },
-                    timeout=22,
+                    timeout=18,
                 )
                 if resp.status_code != 200:
                     print(f"[OpenRouter] {model_name} status={resp.status_code}")
@@ -263,6 +263,10 @@ def _extract_fallback_photo_query(user_text: str) -> str:
         "машини": "car",
         "машина": "car",
         "авто": "car",
+        "робота": "robot",
+        "робот": "robot",
+        "природи": "nature landscape",
+        "природа": "nature landscape",
     }
     for uk_key, en_val in quick_map.items():
         if re.search(rf"\b{re.escape(uk_key)}\b", lower):
@@ -342,7 +346,7 @@ def chat_endpoint():
             bucket["used"] += cost
             new_remaining = max(0, bucket["limit"] - bucket["used"])
             return jsonify({
-                "reply": "Моделі зараз перевантажені, але я підтягнув фото напряму:",
+                "reply": "Тримай фото за твоїм запитом:",
                 "photos": [fallback_photo],
                 "size_tier": size_tier,
                 "cost": cost,
@@ -363,6 +367,10 @@ def chat_endpoint():
 
     reply, photos = process_photo_markers(reply)
     reply = clean_display_text(reply)
+
+    if photos and (not reply or "порожня відповідь від сервера" in reply.lower()):
+        reply = "Тримай фото за твоїм запитом!"
+
     bucket["used"] += cost
     new_remaining = max(0, bucket["limit"] - bucket["used"])
 

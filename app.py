@@ -1,501 +1,397 @@
 import asyncio
 import io
+import json
 import os
 import re
 import time
-import requests
+import urllib.error
+import urllib.request
 from flask import Flask, jsonify, request, send_file, send_from_directory
+
 from pixabay_photo import process_photo_markers, search_pixabay_photo
 from prompt_builder import build_system_prompt, clean_display_text
-from web_search import needs_web_search, web_search
 
 try:
     import edge_tts
 except Exception:
     edge_tts = None
 
-app = Flask(__name__)
 
-BASE_DAILY_LIMIT = 250
-BONUS_PER_EXTRA_KEY = 0
+app = Flask(__name__, static_folder=".", static_url_path="")
 
-REQUEST_COSTS = {
-    "small": 1,
-    "medium": 3,
-    "large": 10,
-}
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-LARGE_KEYWORDS = [
-    "великий код",
-    "напиши код",
-    "напиши програму",
-    "напиши сайт",
-    "напиши скрипт",
-    "твір",
-    "есе",
-    "велике есе",
-    "доповідь",
-    "реферат",
-    "з нуля",
-    "архітектур",
-    "детальний розбір",
-    "повний код",
-    "багато коду",
-]
-
-MEDIUM_KEYWORDS = [
-    "поясни",
-    "інформац",
-    "порівняй",
-    "приклади",
-    "як працює",
-    "зроби план",
-    "короткий код",
-    "фрагмент коду",
-    "виправ помилку",
-    "чому",
-    "навіщо",
-]
-
-MODE_MODELS = {
+MODELS_BY_MODE = {
     "fast": [
         "google/gemma-4-26b-a4b-it:free",
-        "nvidia/nemotron-3-5-lightning:free",
-    ],
-    "study": [
+        "nvidia/nemotron-3.5-super-vl:free",
         "google/gemma-4-31b-it:free",
-        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "google/gemma-4-26b-a4b-it:free",
+        "nvidia/nemotron-3-ultra:free",
     ],
     "smart": [
         "google/gemma-4-31b-it:free",
-        "recursive/flint-v1:0:free",
-        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "google/gemma-4-26b-a4b-it:free",
+        "nvidia/nemotron-3.5-super-vl:free",
+        "nvidia/nemotron-3-ultra:free",
     ],
     "pro": [
-        "nvidia/nemotron-3-ultra-550b-a55b:free",
-        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "google/gemma-4-31b-it:free",
+        "nvidia/nemotron-3-ultra:free",
+        "nvidia/nemotron-3.5-super-vl:free",
+        "google/gemma-4-26b-a4b-it:free",
+    ],
+    "study": [
+        "google/gemma-4-31b-it:free",
+        "google/gemma-4-26b-a4b-it:free",
+        "nvidia/nemotron-3.5-super-vl:free",
+        "nvidia/nemotron-3-ultra:free",
     ],
 }
 
-ALL_FALLBACK_MODELS = [
+AUTO_CHAIN = [
     "google/gemma-4-31b-it:free",
     "google/gemma-4-26b-a4b-it:free",
-    "nvidia/nemotron-3-5-lightning:free",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    "recursive/flint-v1:0:free",
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "nvidia/nemotron-3-ultra:free",
 ]
 
-VISION_MODELS = [
-    "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-]
-
-USAGE_STORE: dict[str, dict] = {}
-KEY_CURSOR = 0
+_KEY_CURSOR = 0
 
 
 def get_api_keys() -> list[str]:
-    return [
-        k.strip()
-        for k in [
-            os.getenv("OPENROUTER_API_KEY", ""),
-            os.getenv("OPENROUTER_API_KEY_2", ""),
-            os.getenv("OPENROUTER_API_KEY_3", ""),
-            os.getenv("OPENROUTER_API_KEY_4", ""),
-            os.getenv("OPENROUTER_API_KEY_5", ""),
-            os.getenv("OPENROUTER_API_KEY_6", ""),
-        ]
-        if k and k.strip()
+    env_names = [
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_API_KEY_2",
+        "OPENROUTER_API_KEY_3",
+        "OPENROUTER_API_KEY_4",
+        "OPENROUTER_API_KEY_5",
+        "OPENROUTER_API_KEY_6",
+        "OPENROUTER_API_KEY_7",
+        "OPENROUTER_API_KEY_8",
+        # "OPENROUTER_API_KEY_9",
     ]
 
+    keys: list[str] = []
+    seen: set[str] = set()
 
-def get_effective_daily_limit(keys_count: int) -> int:
-    extra_keys = max(0, keys_count - 1)
-    return BASE_DAILY_LIMIT + (extra_keys * BONUS_PER_EXTRA_KEY)
+    for name in env_names:
+        val = (os.environ.get(name) or "").strip()
+        if val and val not in seen:
+            seen.add(val)
+            keys.append(val)
 
-
-def classify_request(text: str, has_image: bool = False) -> tuple[str, int]:
-    clean = (text or "").strip()
-    lower = clean.lower()
-    length = len(clean)
-
-    if any(kw in lower for kw in LARGE_KEYWORDS) or length >= 450:
-        return "large", REQUEST_COSTS["large"]
-
-    if has_image or any(kw in lower for kw in MEDIUM_KEYWORDS) or length >= 90:
-        return "medium", REQUEST_COSTS["medium"]
-
-    return "small", REQUEST_COSTS["small"]
+    return keys
 
 
-def get_day_key() -> str:
-    return time.strftime("%Y-%m-%d", time.gmtime())
-
-
-def get_client_bucket(client_id: str, daily_limit: int) -> dict:
-    safe_id = (client_id or "anon").strip()[:64] or "anon"
-    today = get_day_key()
-    entry = USAGE_STORE.get(safe_id)
-    if not entry or entry.get("day") != today:
-        entry = {"day": today, "used": 0, "limit": daily_limit}
-        USAGE_STORE[safe_id] = entry
-    entry["limit"] = daily_limit
-    return entry
-
-
-@app.get("/")
-def home():
-    return send_from_directory(".", "index.html")
-
-
-@app.get("/icon.png")
-def favicon():
-    return send_from_directory(".", "icon.png")
-
-
-@app.get("/api/limit-status")
-def limit_status():
-    client_id = (request.args.get("client_id") or "anon").strip()
+def ordered_keys_for_request() -> list[str]:
+    global _KEY_CURSOR
     keys = get_api_keys()
-    daily_limit = get_effective_daily_limit(len(keys))
-    bucket = get_client_bucket(client_id, daily_limit)
-    remaining = max(0, bucket["limit"] - bucket["used"])
-    return jsonify({
-        "used": bucket["used"],
-        "limit": bucket["limit"],
-        "remaining": remaining,
-        "costs": REQUEST_COSTS,
-    })
+    if not keys:
+        return []
+    start = _KEY_CURSOR % len(keys)
+    _KEY_CURSOR = (_KEY_CURSOR + 1) % len(keys)
+    return keys[start:] + keys[:start]
 
 
-@app.post("/api/tts")
-def tts_endpoint():
-    if edge_tts is None:
-        return jsonify({"error": "Серверне озвучування тимчасово недоступне."}), 503
+def build_model_candidates(mode: str) -> list[str]:
+    clean_mode = (mode or "auto").strip().lower()
+    candidates: list[str] = []
 
-    data = request.get_json(silent=True) or {}
-    text = (data.get("text") or "").strip()
-    voice = (data.get("voice") or "uk-UA-OstapNeural").strip()
+    if clean_mode in MODELS_BY_MODE:
+        for m in MODELS_BY_MODE[clean_mode]:
+            if m and m not in candidates:
+                candidates.append(m)
 
-    if voice not in ("uk-UA-OstapNeural", "uk-UA-PolinaNeural"):
-        voice = "uk-UA-OstapNeural"
+    for m in AUTO_CHAIN:
+        if m and m not in candidates:
+            candidates.append(m)
 
-    if not text:
-        return jsonify({"error": "Немає тексту для озвучування."}), 400
-
-    safe_text = text[:1200]
-
-    async def _synth():
-        communicate = edge_tts.Communicate(safe_text, voice=voice)
-        buf = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk.get("type") == "audio":
-                buf.write(chunk.get("data", b""))
-        buf.seek(0)
-        return buf
-
-    try:
-        audio_buf = asyncio.run(_synth())
-        if audio_buf.getbuffer().nbytes == 0:
-            return jsonify({"error": "Не вдалося згенерувати голос."}), 502
-        return send_file(audio_buf, mimetype="audio/mpeg")
-    except Exception as exc:
-        print(f"[TTS] error={exc}")
-        return jsonify({"error": "Помилка озвучування."}), 500
+    return candidates
 
 
-def get_candidate_models(mode: str, has_image: bool = False) -> list[str]:
-    if has_image:
-        return list(VISION_MODELS)
-
-    chosen = MODE_MODELS.get(mode, [])
-    merged = list(chosen)
-    for m in ALL_FALLBACK_MODELS:
-        if m not in merged:
-            merged.append(m)
-    return merged[:4]
-
-
-def build_user_content(text: str, image_data: str | None):
-    if image_data:
-        return [
-            {"type": "text", "text": text if text else "Що зображено на цьому фото?"},
-            {"type": "image_url", "image_url": {"url": image_data}},
-        ]
-    return text
+def _extract_message_text(content) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if item.get("type") == "text" and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+        return "\n".join(p.strip() for p in parts if p and p.strip()).strip()
+    return ""
 
 
-def _extract_reasoning_from_text(raw: str) -> tuple[str, str]:
-    if not raw:
-        return "", ""
-    reasons = []
-    for match in re.finditer(r"<think>([\s\S]*?)</think>", raw, flags=re.IGNORECASE):
-        chunk = (match.group(1) or "").strip()
-        if chunk:
-            reasons.append(chunk)
-    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", raw, flags=re.IGNORECASE).strip()
-    return cleaned, "\n\n".join(reasons).strip()
-
-
-def call_openrouter(
+def _call_openrouter(
+    api_key: str,
+    model: str,
     messages: list[dict],
-    models: list[str],
-    api_keys: list[str],
-) -> tuple[str | None, str]:
-    global KEY_CURSOR
+    timeout: int = 16,
+) -> tuple[str, str | None]:
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.65,
+    }
 
-    if not api_keys:
-        return None, ""
-
-    headers_base = {
+    headers = {
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://vasya2-0.vercel.app",
+        "HTTP-Referer": os.environ.get("APP_URL", "https://vasya-ai.vercel.app"),
         "X-Title": "Vasya AI",
     }
 
-    keys_count = len(api_keys)
+    req = urllib.request.Request(
+        OPENROUTER_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
 
-    for step_idx, model_name in enumerate(models):
-        key_slot = (KEY_CURSOR + step_idx) % keys_count
-        api_key = api_keys[key_slot]
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw_body = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(raw_body)
+    except urllib.error.HTTPError as exc:
+        err_body = ""
         try:
-            resp = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    **headers_base,
-                    "Authorization": f"Bearer {api_key}",
-                },
-                json={
-                    "model": model_name,
-                    "messages": messages,
-                },
-                timeout=11,
-            )
+            err_body = exc.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        return "", f"HTTP {exc.code}: {err_body or exc.reason}"
+    except Exception as exc:
+        return "", str(exc)
 
-            if resp.status_code == 429 and keys_count > 1:
-                alt_slot = (key_slot + 1) % keys_count
-                resp = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        **headers_base,
-                        "Authorization": f"Bearer {api_keys[alt_slot]}",
-                    },
-                    json={
-                        "model": model_name,
-                        "messages": messages,
-                    },
-                    timeout=11,
-                )
+    choices = data.get("choices") or []
+    if not choices:
+        return "", "No choices in response"
 
-            if resp.status_code != 200:
-                print(f"[OpenRouter] {model_name} status={resp.status_code}")
+    msg = choices[0].get("message") or {}
+    text = _extract_message_text(msg.get("content"))
+    if not text:
+        reasoning = _extract_message_text(msg.get("reasoning_content") or msg.get("reasoning"))
+        if reasoning:
+            text = reasoning
+    if not text:
+        return "", "Empty model content"
+
+    return text, None
+
+
+def _build_api_messages(
+    system_prompt: str,
+    history: list[dict],
+    user_text: str,
+    image_data_url: str = "",
+) -> list[dict]:
+    api_messages: list[dict] = [{"role": "system", "content": system_prompt}]
+
+    if isinstance(history, list):
+        for item in history[-10:]:
+            if not isinstance(item, dict):
                 continue
-
-            payload = resp.json()
-            choices = payload.get("choices") or []
-            if not choices:
+            role = item.get("role")
+            if role not in ("user", "assistant"):
                 continue
+            txt = str(item.get("text") or "").strip()
+            if not txt:
+                continue
+            api_messages.append({"role": role, "content": txt[:2500]})
 
-            msg_obj = choices[0].get("message") or {}
-            raw_content = msg_obj.get("content")
-            if isinstance(raw_content, list):
-                text_parts = [
-                    part.get("text", "")
-                    for part in raw_content
-                    if isinstance(part, dict) and part.get("type") == "text"
-                ]
-                raw_text = "".join(text_parts).strip()
-            elif isinstance(raw_content, str):
-                raw_text = raw_content.strip()
-            else:
-                raw_text = ""
+    clean_user = (user_text or "").strip()
+    if image_data_url:
+        content_parts: list[dict] = []
+        if clean_user:
+            content_parts.append({"type": "text", "text": clean_user})
+        else:
+            content_parts.append({"type": "text", "text": "Розглянь це фото та розкажи, що на ньому."})
+        content_parts.append({
+            "type": "image_url",
+            "image_url": {"url": image_data_url},
+        })
+        api_messages.append({"role": "user", "content": content_parts})
+    else:
+        api_messages.append({"role": "user", "content": clean_user or "Привіт!"})
 
-            cleaned_text, _ = _extract_reasoning_from_text(raw_text)
-
-            if cleaned_text:
-                KEY_CURSOR = (key_slot + 1) % keys_count
-                return cleaned_text, model_name
-        except Exception as exc:
-            print(f"[OpenRouter] {model_name} error={exc}")
-            continue
-
-    return None, ""
+    return api_messages
 
 
-def _extract_fallback_photo_query(user_text: str) -> str:
-    lower = (user_text or "").lower().strip()
-    if not lower:
+def _fallback_photo_query_if_requested(user_text: str) -> str:
+    low = (user_text or "").lower()
+    if not re.search(r"\b(фото|картинк|зображен|покаж|скин|photo|image)\b", low):
         return ""
-    if not any(word in lower for word in ("фото", "картинк", "зображен", "покаж", "скин", "photo", "image")):
-        return ""
-
-    quick_map = {
+    mapping = {
+        "собак": "dog",
+        "пес": "dog",
+        "цуцен": "puppy",
+        "кіт": "cat",
+        "кота": "cat",
+        "кошен": "kitten",
         "тигр": "tiger",
-        "кота": "cute cat",
-        "кіт": "cute cat",
-        "кішка": "cute cat",
-        "собаки": "happy dog",
-        "собака": "happy dog",
-        "пес": "happy dog",
-        "жаби": "green frog",
-        "жаба": "green frog",
-        "людини": "person portrait",
-        "людина": "person portrait",
-        "вовка": "wolf",
+        "лев": "lion",
         "вовк": "wolf",
-        "ведмедя": "bear",
-        "ведмідь": "bear",
-        "лисиці": "fox",
-        "лисиця": "fox",
-        "машини": "car",
-        "машина": "car",
+        "лисиц": "fox",
+        "ведмед": "bear",
+        "захід сонц": "sunset",
+        "гори": "mountains",
+        "море": "sea ocean",
+        "ліс": "forest",
+        "машин": "car",
         "авто": "car",
-        "робота": "robot",
-        "робот": "robot",
-        "природи": "nature landscape",
-        "природа": "nature landscape",
+        "космос": "space galaxy",
+        "сніг": "winter snow",
+        "ялинк": "christmas tree",
     }
-    for uk_key, en_val in quick_map.items():
-        if re.search(rf"\b{re.escape(uk_key)}\b", lower):
-            return en_val
+    for ru_uk_stem, en_q in mapping.items():
+        if ru_uk_stem in low:
+            return en_q
+    return ""
 
-    cleaned = re.sub(r"\b(скинь|покажи|дай|знайди|фото|картинку|зображення|мені|будь ласка)\b", "", lower)
-    cleaned = re.sub(r"[^a-zа-яіїєґ0-9\s-]", " ", cleaned)
-    cleaned = " ".join(cleaned.split()).strip()
-    return cleaned[:60]
+
+async def _synth_edge_tts(text: str, voice: str) -> bytes:
+    communicator = edge_tts.Communicate(text, voice)
+    buf = io.BytesIO()
+    async for chunk in communicator.stream():
+        if chunk.get("type") == "audio" and chunk.get("data"):
+            buf.write(chunk["data"])
+    return buf.getvalue()
+
+
+@app.get("/")
+def index():
+    return send_from_directory(".", "index.html")
+
+
+@app.get("/api/health")
+def health():
+    keys = get_api_keys()
+    return jsonify({
+        "ok": True,
+        "keys_loaded": len(keys),
+        "tts_available": edge_tts is not None,
+    })
 
 
 @app.post("/api/chat")
-def chat_endpoint():
+def api_chat():
+    try:
+        data = request.get_json(silent=True) or {}
+        user_text = str(data.get("message") or "").strip()
+        mode = str(data.get("mode") or "auto").strip().lower()
+        preferred_language = str(data.get("language") or "auto").strip().lower()
+        history = data.get("history") or []
+        image_data_url = str(data.get("image") or data.get("image_base64") or "").strip()
+
+        if not user_text and not image_data_url:
+            return jsonify({"error": "Порожній запит"}), 400
+
+        keys = ordered_keys_for_request()
+        if not keys:
+            return jsonify({
+                "reply": "Не знайдено жодного ключа OPENROUTER_API_KEY у налаштуваннях сервера.",
+                "error": "Missing API keys",
+            }), 200
+
+        system_prompt = build_system_prompt(
+            search_context="",
+            mode=mode,
+            has_image=bool(image_data_url),
+            preferred_language=preferred_language,
+        )
+        api_messages = _build_api_messages(
+            system_prompt=system_prompt,
+            history=history,
+            user_text=user_text,
+            image_data_url=image_data_url,
+        )
+
+        models = build_model_candidates(mode)
+        raw_reply = ""
+        last_err = ""
+        start_ts = time.time()
+
+        for model_idx, model in enumerate(models):
+            if time.time() - start_ts > 42:
+                break
+            keys_to_try = keys[: min(3, len(keys))]
+            if model_idx > 0 and len(keys) > 1:
+                rotated = keys[model_idx % len(keys) :] + keys[: model_idx % len(keys)]
+                keys_to_try = rotated[: min(2, len(rotated))]
+
+            for key in keys_to_try:
+                if time.time() - start_ts > 42:
+                    break
+                text, err = _call_openrouter(key, model, api_messages, timeout=14)
+                if text:
+                    raw_reply = text
+                    break
+                last_err = err or "Unknown error"
+
+            if raw_reply:
+                break
+
+        cleaned_text, photos = process_photo_markers(raw_reply, max_photos=2)
+        cleaned_text = clean_display_text(cleaned_text)
+
+        if not photos:
+            fallback_q = _fallback_photo_query_if_requested(user_text)
+            if fallback_q:
+                found_photo = search_pixabay_photo(fallback_q)
+                if found_photo:
+                    photos = [found_photo]
+
+        if not cleaned_text:
+            if photos:
+                cleaned_text = "Тримай фото, яке вдалося знайти."
+            else:
+                cleaned_text = (
+                    "Моделі зараз не повернули текст. "
+                    "Спробуй надіслати запит ще раз за кілька секунд."
+                )
+
+        return jsonify({
+            "reply": cleaned_text,
+            "photos": photos,
+            "language": preferred_language,
+            "debug_error": last_err if not raw_reply else None,
+        })
+
+    except Exception as exc:
+        return jsonify({
+            "reply": "Стався тимчасовий збій під час обробки запиту. Спробуй ще раз за кілька секунд.",
+            "photos": [],
+            "error": str(exc),
+        }), 200
+
+
+@app.post("/api/tts")
+def api_tts():
+    if edge_tts is None:
+        return jsonify({"error": "TTS unavailable"}), 503
+
     data = request.get_json(silent=True) or {}
+    text = str(data.get("text") or "").strip()[:1200]
+    voice = str(data.get("voice") or "uk-UA-OstapNeural").strip()
 
-    user_text = (data.get("message") or "").strip()
-    model_mode = (data.get("model_mode") or "auto").strip().lower()
-    image_data = data.get("image")
-    history = data.get("history") or []
-    client_id = (data.get("client_id") or "anon").strip()
+    if not text:
+        return jsonify({"error": "Empty text"}), 400
 
-    if not user_text and not image_data:
-        return jsonify({"error": "Порожній запит."}), 400
+    try:
+        audio_bytes = asyncio.run(_synth_edge_tts(text, voice))
+        if not audio_bytes:
+            return jsonify({"error": "Empty audio"}), 502
+        return send_file(
+            io.BytesIO(audio_bytes),
+            mimetype="audio/mpeg",
+            as_attachment=False,
+            download_name="vasya_speech.mp3",
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
-    api_keys = get_api_keys()
-    daily_limit = get_effective_daily_limit(len(api_keys))
-    bucket = get_client_bucket(client_id, daily_limit)
 
-    size_tier, cost = classify_request(user_text, has_image=bool(image_data))
-    remaining = max(0, bucket["limit"] - bucket["used"])
-
-    if cost > remaining:
-        return jsonify({
-            "reply": (
-                f"Не вистачає ліміту на сьогодні: цей запит оцінено як {size_tier} ({cost} од.), "
-                f"а залишилось {remaining} з {bucket['limit']} од."
-            ),
-            "photos": [],
-            "thoughts": f"• Ліміт вичерпано: потрібно {cost} од., залишилось {remaining} од.",
-            "limit_exceeded": True,
-            "size_tier": size_tier,
-            "cost": cost,
-            "used": bucket["used"],
-            "limit": bucket["limit"],
-            "remaining": remaining,
-        }), 429
-
-    trace: list[str] = [f"• Режим: {model_mode} • Оцінка: {size_tier} ({cost} од.)"]
-    has_image = bool(image_data)
-    if has_image:
-        trace.append("• Розглядаю прикріплене фото")
-
-    search_ctx = ""
-    if user_text and needs_web_search(user_text):
-        trace.append(f"• Шукаю в інтернеті: «{user_text[:70]}»")
-        search_ctx = web_search(user_text)
-        trace.append("• Дані вебпошуку отримано" if search_ctx else "• Вебпошук не дав додаткових результатів")
-
-    system_prompt = build_system_prompt(
-        search_context=search_ctx,
-        mode=model_mode,
-        has_image=has_image,
-    )
-
-    messages = [{"role": "system", "content": system_prompt}]
-
-    for item in history:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        content = item.get("content")
-        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
-            messages.append({"role": role, "content": content.strip()})
-
-    messages.append({
-        "role": "user",
-        "content": build_user_content(user_text, image_data),
-    })
-
-    models_to_try = get_candidate_models(model_mode, has_image=has_image)
-    reply, _ = call_openrouter(
-        messages=messages,
-        models=models_to_try,
-        api_keys=api_keys,
-    )
-
-    if not reply:
-        fallback_q = _extract_fallback_photo_query(user_text)
-        if fallback_q:
-            trace.append(f"• Шукаю фото на Pixabay: «{fallback_q}»")
-            fallback_photo = search_pixabay_photo(fallback_q)
-            if fallback_photo:
-                trace.append("• Фото на Pixabay знайдено")
-                bucket["used"] += cost
-                new_remaining = max(0, bucket["limit"] - bucket["used"])
-                return jsonify({
-                    "reply": "Тримай фото за твоїм запитом:",
-                    "photos": [fallback_photo],
-                    "thoughts": "\n".join(trace),
-                    "size_tier": size_tier,
-                    "cost": cost,
-                    "used": bucket["used"],
-                    "limit": bucket["limit"],
-                    "remaining": new_remaining,
-                })
-            trace.append("• На Pixabay фото за цим запитом не знайдено")
-
-        trace.append("• Не вдалося сформувати відповідь з першої спроби")
-        return jsonify({
-            "reply": "На жаль, зараз не вдалося відповісти. Спробуй ще раз.",
-            "photos": [],
-            "thoughts": "\n".join(trace),
-            "size_tier": size_tier,
-            "cost": cost,
-            "used": bucket["used"],
-            "limit": bucket["limit"],
-            "remaining": remaining,
-        }), 502
-
-    reply, photos = process_photo_markers(reply)
-    if photos:
-        trace.append(f"• Підтягнуто фото з Pixabay: {len(photos)}")
-    reply = clean_display_text(reply)
-
-    if photos and (not reply or "порожня відповідь від сервера" in reply.lower()):
-        reply = "Тримай фото за твоїм запитом!"
-
-    trace.append("• Розібрався із запитом і підготував відповідь")
-
-    bucket["used"] += cost
-    new_remaining = max(0, bucket["limit"] - bucket["used"])
-
-    return jsonify({
-        "reply": reply,
-        "photos": photos,
-        "thoughts": "\n".join(trace),
-        "size_tier": size_tier,
-        "cost": cost,
-        "used": bucket["used"],
-        "limit": bucket["limit"],
-        "remaining": new_remaining,
-    })
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
